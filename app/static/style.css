@@ -80,9 +80,13 @@ h1 {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   padding: 18px 24px 30px;
+}
+
+.side-panel.hidden {
+  display: none;
 }
 
 .main-panel,
@@ -98,9 +102,21 @@ h1 {
 }
 
 .side-panel {
-  padding: 14px;
-  max-height: calc(100vh - 110px);
+  position: fixed;
+  right: 14px;
+  top: 88px;
+  z-index: 25;
+  width: min(280px, 24vw);
+  max-height: 38vh;
   overflow: auto;
+  padding: 10px;
+  border-radius: 12px;
+  backdrop-filter: blur(8px);
+}
+
+.side-panel h2 {
+  font-size: 18px;
+  margin-bottom: 6px;
 }
 
 .tabs {
@@ -253,6 +269,12 @@ button:hover {
   border-color: var(--line-strong);
 }
 
+.btn-danger {
+  border-color: rgba(181, 92, 92, 0.42);
+  background: rgba(146, 72, 72, 0.2);
+  color: #ffc9c9;
+}
+
 .topic-grid {
   margin-top: 14px;
   display: grid;
@@ -358,16 +380,22 @@ button:hover {
 }
 
 .job-list {
-  margin-top: 10px;
+  margin-top: 4px;
   display: grid;
-  gap: 8px;
+  gap: 6px;
+}
+
+.queue-summary {
+  font-size: 12px;
+  color: var(--ink-soft);
 }
 
 .job-item {
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 8px;
+  padding: 6px 8px;
   background: #101018;
+  font-size: 13px;
 }
 
 .job-status {
@@ -475,12 +503,26 @@ button:hover {
 
 .shelf-form {
   display: flex;
+  align-items: center;
   gap: 8px;
-  width: min(760px, 64vw);
+  width: min(920px, 72vw);
 }
 
-.shelf-form input {
+.shelf-form > input {
+  flex: 0 0 220px;
+}
+
+.shelf-roots-row {
   flex: 1;
+  min-width: 280px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shelf-roots-row input {
+  flex: 1;
+  min-width: 0;
 }
 
 .toast {
@@ -498,10 +540,6 @@ button:hover {
 @media (max-width: 1080px) {
   .layout {
     grid-template-columns: 1fr;
-  }
-
-  .side-panel {
-    max-height: none;
   }
 }
 
@@ -536,12 +574,29 @@ button:hover {
   }
 
   .side-panel {
+    top: auto;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    right: 10px;
+    width: min(86vw, 300px);
+    max-height: 34vh;
     order: 2;
   }
 
   .shelf-form {
     width: 100%;
     flex-direction: column;
+    align-items: stretch;
+  }
+
+  .shelf-form > input {
+    flex: 1;
+  }
+
+  .shelf-roots-row {
+    min-width: 0;
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .tabs {

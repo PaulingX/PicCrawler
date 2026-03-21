@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -13,8 +14,15 @@ from flask import Blueprint, abort, current_app, jsonify, redirect, render_templ
 
 from app.config import USER_AGENT
 from app.database import execute, query_all, query_one, setting_get, setting_set
-from app.services.library_scanner import create_custom_shelf, ensure_rule_shelf, list_shelves, refresh_shelf
+from app.services.library_scanner import (
+    create_custom_shelf,
+    delete_custom_shelf,
+    ensure_rule_shelf,
+    list_shelves,
+    refresh_shelf,
+)
 from app.services.rule_registry import build_crawler, get_rule, list_rules
+from app.services.utils import is_image_file, sanitize_name
 
 bp = Blueprint("main", __name__)
 
@@ -343,6 +351,23 @@ def api_download_topic():
         str((Path(current_app.config["DOWNLOAD_ROOT"]) / rule_id).resolve()),
     )
     Path(download_dir).mkdir(parents=True, exist_ok=True)
+    target_dir = (Path(download_dir) / sanitize_name(title)).resolve()
+    if target_dir.exists():
+        has_existing_images = False
+        try:
+            has_existing_images = any(is_image_file(p) for p in target_dir.iterdir())
+        except OSError:
+            has_existing_images = False
+        if has_existing_images:
+            return jsonify(
+                {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "folder_exists",
+                    "target_dir": str(target_dir),
+                    "message": "同名目录已存在且包含图片，已跳过下载",
+                }
+            )
 
     provided_urls = payload.get("image_urls")
     image_urls: list[str] = []
@@ -374,12 +399,14 @@ def api_download_topic():
 
 @bp.get("/api/download/jobs")
 def api_download_jobs():
+    _cleanup_stale_download_jobs()
     limit = max(1, min(200, int(request.args.get("limit", "30"))))
     rows = query_all(
         """
         SELECT job_id, rule_id, topic_id, title, status, total_images,
                downloaded_images, error_message, target_dir, created_at, updated_at
         FROM download_jobs
+        WHERE status IN ('queued', 'running')
         ORDER BY updated_at DESC
         LIMIT ?
         """,
@@ -422,6 +449,17 @@ def api_refresh_shelf(shelf_id: int):
         result = refresh_shelf(shelf_id)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
+    return jsonify({"ok": True, "result": result})
+
+
+@bp.delete("/api/shelves/<int:shelf_id>")
+def api_delete_shelf(shelf_id: int):
+    try:
+        result = delete_custom_shelf(shelf_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
     return jsonify({"ok": True, "result": result})
 
 
@@ -546,6 +584,51 @@ def _is_rule_online_enabled(rule_id: str) -> bool:
     return int(row["enabled"]) == 1
 
 
+def _cleanup_stale_download_jobs() -> None:
+    # If there is at least one running task, queued tasks are still valid.
+    running_row = query_one("SELECT COUNT(1) AS cnt FROM download_jobs WHERE status = 'running'")
+    running_count = int(running_row["cnt"]) if running_row else 0
+    if running_count > 0:
+        return
+
+    rows = query_all(
+        "SELECT job_id, updated_at FROM download_jobs WHERE status = 'queued' ORDER BY updated_at DESC"
+    )
+    if not rows:
+        return
+
+    now = datetime.utcnow()
+    stale_ids: list[str] = []
+    for row in rows:
+        updated_at = str(row["updated_at"] or "").strip()
+        if not updated_at:
+            stale_ids.append(str(row["job_id"]))
+            continue
+        try:
+            ts = datetime.fromisoformat(updated_at)
+        except ValueError:
+            stale_ids.append(str(row["job_id"]))
+            continue
+        if now - ts > timedelta(seconds=60):
+            stale_ids.append(str(row["job_id"]))
+
+    for job_id in stale_ids:
+        execute(
+            """
+            UPDATE download_jobs
+            SET status='failed',
+                error_message=CASE
+                    WHEN error_message IS NULL OR error_message = ''
+                    THEN '任务未执行，已自动清理'
+                    ELSE error_message
+                END,
+                updated_at=?
+            WHERE job_id=?
+            """,
+            (now.isoformat(timespec="seconds"), job_id),
+        )
+
+
 def _get_cached_topics(rule_id: str, page_no: int) -> list[dict]:
     rows = query_all(
         """
@@ -619,6 +702,10 @@ def _is_low_quality_gallery_url(rule_id: str, url: str) -> bool:
 def _cached_images_need_refresh(rule_id: str, urls: list[str]) -> bool:
     if not urls:
         return False
+    if rule_id == "hitomi-chinese":
+        # Hitomi URL algorithm updates can invalidate cached domains/paths;
+        # always refresh to avoid serving stale 404 links.
+        return True
     if rule_id not in {"wnacg", "manxiangge"}:
         return False
 

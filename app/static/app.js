@@ -4,6 +4,7 @@ const state = {
   activeTab: null,
   page: 1,
   topics: [],
+  newShelfRoots: [],
   selectedTopics: new Map(),
   onlineSearch: new Map(),
   onlineCategory: new Map(),
@@ -25,6 +26,7 @@ const actionsEl = document.getElementById("tab-actions");
 const topicGridEl = document.getElementById("topic-grid");
 const pageInfoEl = document.getElementById("page-info");
 const jobListEl = document.getElementById("job-list");
+const sidePanelEl = document.querySelector(".side-panel");
 
 const viewerEl = document.getElementById("viewer");
 const viewerBodyEl = document.getElementById("viewer-body");
@@ -46,6 +48,12 @@ async function pickRuleDownloadDir(initialDir = "") {
     body: JSON.stringify({ initial_dir: initialDir || "" }),
   });
   return (data.path || "").trim();
+}
+
+function renderShelfRootsDisplay() {
+  const el = document.getElementById("shelf-roots-display");
+  if (!el) return;
+  el.value = state.newShelfRoots.join(" ; ");
 }
 
 function showToast(message) {
@@ -79,6 +87,10 @@ function getRuleById(ruleId) {
   return state.rules.find((item) => item.rule_id === ruleId) || null;
 }
 
+function getShelfById(shelfId) {
+  return state.shelves.find((item) => String(item.shelf_id) === String(shelfId)) || null;
+}
+
 function getRuleCategories(ruleId) {
   const rule = getRuleById(ruleId);
   const categories = Array.isArray(rule?.categories) ? rule.categories : [];
@@ -100,15 +112,13 @@ function getOnlineCategory(ruleId) {
 
 function getOnlineCategoryLabel(ruleId, categoryId) {
   const id = Number(categoryId);
-  if ((ruleId === "wnacg" || ruleId === "manxiangge") && Number.isInteger(id)) {
-    const labelMap = {
-      1: "汉化同人志",
-      9: "汉化单行本",
-      10: "汉化短篇",
-    };
-    if (labelMap[id]) {
-      return labelMap[id];
-    }
+  if (ruleId === "wnacg" && Number.isInteger(id)) {
+    const labelMap = { 1: "汉化同人志", 9: "汉化单行本", 10: "汉化短篇" };
+    return labelMap[id] || `cate-${id}`;
+  }
+  if (ruleId === "manxiangge" && Number.isInteger(id)) {
+    const labelMap = { 2: "单行本", 4: "同人志" };
+    return labelMap[id] || `cate-${id}`;
   }
   return `cate-${id}`;
 }
@@ -326,6 +336,27 @@ async function reloadAllMeta() {
 }
 
 function bindBaseEvents() {
+  document.getElementById("btn-pick-shelf-root").addEventListener("click", async () => {
+    try {
+      const initialDir = state.newShelfRoots.length ? state.newShelfRoots[state.newShelfRoots.length - 1] : "";
+      const picked = await pickRuleDownloadDir(initialDir);
+      if (!picked) {
+        return;
+      }
+      if (!state.newShelfRoots.includes(picked)) {
+        state.newShelfRoots.push(picked);
+      }
+      renderShelfRootsDisplay();
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+
+  document.getElementById("btn-clear-shelf-roots").addEventListener("click", () => {
+    state.newShelfRoots = [];
+    renderShelfRootsDisplay();
+  });
+
   document.getElementById("btn-prev").addEventListener("click", async () => {
     if (state.page <= 1) return;
     state.page -= 1;
@@ -339,16 +370,11 @@ function bindBaseEvents() {
 
   document.getElementById("btn-create-shelf").addEventListener("click", async () => {
     const name = document.getElementById("shelf-name").value.trim();
-    const rootsRaw = document.getElementById("shelf-roots").value.trim();
-    if (!name || !rootsRaw) {
+    const roots = state.newShelfRoots.slice(0, 10);
+    if (!name || roots.length === 0) {
       showToast("请填写书架名称和路径");
       return;
     }
-
-    const roots = rootsRaw
-      .split(";")
-      .map((v) => v.trim())
-      .filter(Boolean);
 
     try {
       await fetchJSON("/api/shelves", {
@@ -358,7 +384,8 @@ function bindBaseEvents() {
       });
       showToast("已新增书架");
       document.getElementById("shelf-name").value = "";
-      document.getElementById("shelf-roots").value = "";
+      state.newShelfRoots = [];
+      renderShelfRootsDisplay();
       state.page = 1;
       await reloadAllMeta();
       await loadTopics();
@@ -376,6 +403,8 @@ function bindBaseEvents() {
     if (!nearBottom) return;
     await loadViewerImages();
   });
+
+  renderShelfRootsDisplay();
 }
 
 function renderTabs() {
@@ -562,6 +591,7 @@ function renderActions() {
       }
 
       let okCount = 0;
+      let skippedCount = 0;
       for (const topicId of selected) {
         const topic = state.topics.find((item) => item.topic_id === topicId);
         if (!topic) continue;
@@ -579,18 +609,23 @@ function renderActions() {
             payload.image_urls = cached.urls.slice();
           }
 
-          await fetchJSON("/api/download", {
+          const result = await fetchJSON("/api/download", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
           });
-          okCount += 1;
+          if (result?.skipped) {
+            skippedCount += 1;
+          } else {
+            okCount += 1;
+          }
         } catch (_) {
           showToast(`下载失败: ${topic.title}`);
         }
       }
 
-      showToast(`已加入下载队列 ${okCount} 个`);
+      const suffix = skippedCount > 0 ? `，跳过 ${skippedCount} 个（目录已存在）` : "";
+      showToast(`已加入下载队列 ${okCount} 个${suffix}`);
       activeSelectionSet().clear();
       renderTopics();
       await pollJobs();
@@ -600,10 +635,17 @@ function renderActions() {
   }
 
   const shelfId = Number(state.activeTab.id);
+  const shelf = getShelfById(state.activeTab.id);
+  const allowDeleteShelf = shelf && shelf.source_type === "custom";
   actionsEl.innerHTML = `
     ${managerHtml}
-    <span>本地书架扫描深度：最多 3 层目录</span>
+    <span>本地书架扫描深度：最多 2 层目录</span>
     <button id="btn-refresh-shelf">刷新当前书架</button>
+    ${
+      allowDeleteShelf
+        ? '<button id="btn-delete-shelf" class="btn-danger">删除当前书架</button>'
+        : ""
+    }
   `;
 
   bindRuleToggleEvents();
@@ -620,6 +662,27 @@ function renderActions() {
       showToast(error.message);
     }
   });
+
+  if (allowDeleteShelf) {
+    document.getElementById("btn-delete-shelf").addEventListener("click", async () => {
+      const confirmed = window.confirm("确认删除当前书架及其数据库中的主题/图片记录？");
+      if (!confirmed) {
+        return;
+      }
+      try {
+        const data = await fetchJSON(`/api/shelves/${shelfId}`, { method: "DELETE" });
+        const result = data.result || {};
+        showToast(
+          `已删除书架：${result.name || ""}（主题 ${result.deleted_topics || 0}，图片 ${result.deleted_images || 0}）`
+        );
+        state.page = 1;
+        await reloadAllMeta();
+        await loadTopics();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  }
 }
 
 async function loadTopics() {
@@ -872,27 +935,44 @@ async function pollJobs() {
     const data = await fetchJSON("/api/download/jobs?limit=40");
     renderJobs(data.items || []);
   } catch (error) {
-    jobListEl.innerHTML = `<div class="empty">下载队列读取失败: ${escapeHtml(error.message)}</div>`;
+    if (sidePanelEl) sidePanelEl.classList.add("hidden");
+    jobListEl.innerHTML = "";
   }
 }
 
 function renderJobs(items) {
   if (!items.length) {
-    jobListEl.innerHTML = '<div class="empty">暂无下载任务</div>';
+    if (sidePanelEl) sidePanelEl.classList.add("hidden");
+    jobListEl.innerHTML = "";
     return;
   }
 
+  if (sidePanelEl) sidePanelEl.classList.remove("hidden");
+
+  const total = items.length;
+  const showing = items.slice(0, 2);
   jobListEl.innerHTML = "";
-  items.forEach((job) => {
+  const summary = document.createElement("div");
+  summary.className = "queue-summary";
+  summary.textContent = `下载中 ${total} 项`;
+  jobListEl.appendChild(summary);
+
+  showing.forEach((job) => {
     const div = document.createElement("div");
     div.className = "job-item";
     div.innerHTML = `
       <div>${escapeHtml(job.title)}</div>
       <div class="job-status">${escapeHtml(job.status)} · ${job.downloaded_images}/${job.total_images}</div>
-      <div class="card-meta">${escapeHtml(job.updated_at || "")}</div>
     `;
     jobListEl.appendChild(div);
   });
+
+  if (total > showing.length) {
+    const more = document.createElement("div");
+    more.className = "card-meta";
+    more.textContent = `还有 ${total - showing.length} 项任务`;
+    jobListEl.appendChild(more);
+  }
 }
 
 function escapeHtml(value) {

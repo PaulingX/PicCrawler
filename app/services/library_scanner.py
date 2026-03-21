@@ -6,9 +6,10 @@ from datetime import datetime
 from pathlib import Path
 
 from app.database import execute, query_all, query_one
-from app.services.utils import find_cover_image, list_recursive_images
+from app.services.utils import list_direct_images
 
-MAX_DEPTH = 3
+# Scan folder and subfolders up to 2 levels.
+MAX_DEPTH = 2
 
 
 def refresh_shelf(shelf_id: int) -> dict:
@@ -32,7 +33,9 @@ def refresh_shelf(shelf_id: int) -> dict:
             continue
 
         for folder in _walk_folders(root_path, MAX_DEPTH):
-            images = list_recursive_images(folder)
+            # Each topic represents one folder; only include images directly in it
+            # to avoid duplicated images across parent/child topics.
+            images = list_direct_images(folder)
             if not images:
                 continue
 
@@ -41,7 +44,7 @@ def refresh_shelf(shelf_id: int) -> dict:
             rel_path = str(folder.relative_to(root_path)) if folder != root_path else "."
             topic_key = f"{root_path.resolve()}::{rel_path}"
             title = folder.name if folder != root_path else root_path.name
-            cover = find_cover_image(folder)
+            cover = images[0]
 
             cur = execute(
                 """
@@ -129,6 +132,47 @@ def list_shelves() -> list[dict]:
     return items
 
 
+def delete_custom_shelf(shelf_id: int) -> dict:
+    shelf = query_one(
+        "SELECT shelf_id, source_type, name FROM shelves WHERE shelf_id = ?",
+        (shelf_id,),
+    )
+    if shelf is None:
+        raise ValueError("Shelf not found")
+
+    if str(shelf["source_type"]) != "custom":
+        raise PermissionError("Only custom shelf can be deleted")
+
+    topic_row = query_one(
+        "SELECT COUNT(1) AS cnt FROM library_topics WHERE shelf_id = ?",
+        (shelf_id,),
+    )
+    image_row = query_one(
+        """
+        SELECT COUNT(1) AS cnt
+        FROM library_images
+        WHERE topic_id IN (SELECT topic_id FROM library_topics WHERE shelf_id = ?)
+        """,
+        (shelf_id,),
+    )
+    topic_count = int(topic_row["cnt"]) if topic_row else 0
+    image_count = int(image_row["cnt"]) if image_row else 0
+
+    execute(
+        "DELETE FROM library_images WHERE topic_id IN (SELECT topic_id FROM library_topics WHERE shelf_id = ?)",
+        (shelf_id,),
+    )
+    execute("DELETE FROM library_topics WHERE shelf_id = ?", (shelf_id,))
+    execute("DELETE FROM shelves WHERE shelf_id = ?", (shelf_id,))
+
+    return {
+        "shelf_id": int(shelf_id),
+        "name": str(shelf["name"]),
+        "deleted_topics": topic_count,
+        "deleted_images": image_count,
+    }
+
+
 def _walk_folders(root: Path, max_depth: int) -> list[Path]:
     results: list[Path] = []
     queue: deque[tuple[Path, int]] = deque([(root, 0)])
@@ -139,7 +183,10 @@ def _walk_folders(root: Path, max_depth: int) -> list[Path]:
         if depth >= max_depth:
             continue
 
-        children = [p for p in folder.iterdir() if p.is_dir()]
+        try:
+            children = [p for p in folder.iterdir() if p.is_dir()]
+        except OSError:
+            continue
         children.sort(key=lambda p: p.name.lower())
         for child in children:
             queue.append((child, depth + 1))

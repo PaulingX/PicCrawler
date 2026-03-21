@@ -19,7 +19,7 @@ _CRAWLER_CAPABILITIES = {
     "crawler_4khd": {"supports_search": 0, "categories": []},
     "crawler_asmhentai": {"supports_search": 0, "categories": []},
     "crawler_wnacg": {"supports_search": 1, "categories": [1, 9, 10]},
-    "crawler_manxiangge": {"supports_search": 1, "categories": [1, 9, 10]},
+    "crawler_manxiangge": {"supports_search": 1, "categories": [2, 4]},
     "crawler_hitomi": {"supports_search": 1, "categories": []},
 }
 

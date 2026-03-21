@@ -21,8 +21,12 @@
       </div>
       <div class="shelf-form">
         <input id="shelf-name" type="text" placeholder="新增本地书架名称" />
-        <input id="shelf-roots" type="text" placeholder="本地路径，多个用 ; 分隔" />
-        <button id="btn-create-shelf">新增书架</button>
+        <div class="shelf-roots-row">
+          <input id="shelf-roots-display" type="text" placeholder="请选择本地书架目录" readonly />
+          <button id="btn-pick-shelf-root" type="button">选择目录</button>
+          <button id="btn-clear-shelf-roots" type="button">清空</button>
+        </div>
+        <button id="btn-create-shelf" type="button">新增书架</button>
       </div>
     </header>
 
@@ -41,7 +45,7 @@
         </div>
       </section>
 
-      <aside class="side-panel">
+      <aside class="side-panel hidden">
         <h2>下载队列</h2>
         <div id="job-list" class="job-list"></div>
       </aside>

@@ -9,6 +9,7 @@ from pathlib import Path
 import requests
 from flask import Flask
 
+from app.config import USER_AGENT
 from app.database import execute
 from app.services.utils import guess_ext, sanitize_name
 
@@ -16,6 +17,10 @@ from app.services.utils import guess_ext, sanitize_name
 class DownloadWorker:
     def __init__(self, app: Flask) -> None:
         self.app = app
+        # Recover interrupted tasks from previous process to avoid
+        # leaving stale queued/running items in UI forever.
+        with self.app.app_context():
+            self._recover_interrupted_jobs()
         self._queue: queue.Queue[dict] = queue.Queue()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -55,6 +60,7 @@ class DownloadWorker:
                 "job_id": job_id,
                 "title": title,
                 "target_dir": target_dir,
+                "detail_url": detail_url,
                 "image_urls": image_urls,
             }
         )
@@ -82,10 +88,32 @@ class DownloadWorker:
         downloaded = 0
         errors: list[str] = []
         image_urls: list[str] = task["image_urls"]
+        detail_url = str(task.get("detail_url", "")).strip()
+        session = requests.Session()
 
         for idx, url in enumerate(image_urls, start=1):
             try:
-                res = requests.get(url, timeout=25, stream=True)
+                headers = {
+                    "User-Agent": USER_AGENT,
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                }
+                if detail_url.startswith("http://") or detail_url.startswith("https://"):
+                    headers["Referer"] = detail_url
+
+                # Retry once with minimal headers for unstable sources.
+                try:
+                    res = session.get(url, timeout=25, stream=True, headers=headers, allow_redirects=True)
+                    res.raise_for_status()
+                except Exception:
+                    res = session.get(
+                        url,
+                        timeout=25,
+                        stream=True,
+                        headers={"User-Agent": USER_AGENT},
+                        allow_redirects=True,
+                    )
+                    res.raise_for_status()
+
                 res.raise_for_status()
                 ext = guess_ext(url)
                 file_path = target / f"{idx:04d}{ext}"
@@ -93,6 +121,7 @@ class DownloadWorker:
                     for chunk in res.iter_content(chunk_size=1024 * 64):
                         if chunk:
                             f.write(chunk)
+                res.close()
                 downloaded += 1
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{idx}:{exc}")
@@ -117,6 +146,23 @@ class DownloadWorker:
             WHERE job_id=?
             """,
             (final_status, "\n".join(errors[:20]) if errors else "", _utcnow(), job_id),
+        )
+
+    def _recover_interrupted_jobs(self) -> None:
+        now = _utcnow()
+        execute(
+            """
+            UPDATE download_jobs
+            SET status='failed',
+                error_message=CASE
+                    WHEN error_message IS NULL OR error_message = ''
+                    THEN '任务被中断（应用重启），已自动结束'
+                    ELSE error_message
+                END,
+                updated_at=?
+            WHERE status IN ('queued', 'running')
+            """,
+            (now,),
         )
 
 

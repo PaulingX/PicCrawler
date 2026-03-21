@@ -528,6 +528,7 @@ class CrawlerWnacg(BaseCrawler):
         attempt_count = 0
 
         for idx, candidate in enumerate(candidates):
+            header_variants = self._build_request_header_variants(page_url=candidate, referer=referer)
             for header_idx, headers in enumerate(header_variants):
                 attempt_count += 1
                 if attempt_count > max_attempts:

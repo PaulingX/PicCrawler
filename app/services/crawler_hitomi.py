@@ -707,7 +707,8 @@ class CrawlerHitomi(BaseCrawler):
             return ""
 
         x = int(hash_value[-1] + hash_value[-3:-1], 16)
-        m = 0 if x in gg.zero_cases else 1
+        # In gg.js, listed "case N:" values map to m=1, default m=0.
+        m = 1 if x in gg.zero_cases else 0
 
         if dir_name == "webp":
             subdomain = f"w{1 + m}"
