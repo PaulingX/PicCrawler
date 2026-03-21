@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PicCrawler 图片在线浏览下载系统</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;600;700&family=Noto+Serif+SC:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="noise"></div>
+    <header class="topbar">
+      <div>
+        <p class="kicker">PicCrawler</p>
+        <h1>图片在线浏览下载系统</h1>
+      </div>
+      <div class="shelf-form">
+        <input id="shelf-name" type="text" placeholder="新增本地书架名称" />
+        <input id="shelf-roots" type="text" placeholder="本地路径，多个用 ; 分隔" />
+        <button id="btn-create-shelf">新增书架</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="main-panel">
+        <div id="tabs" class="tabs"></div>
+
+        <div id="tab-actions" class="tab-actions"></div>
+
+        <div id="topic-grid" class="topic-grid"></div>
+
+        <div class="pager">
+          <button id="btn-prev">上一页</button>
+          <span id="page-info">第 1 页</span>
+          <button id="btn-next">下一页</button>
+        </div>
+      </section>
+
+      <aside class="side-panel">
+        <h2>下载队列</h2>
+        <div id="job-list" class="job-list"></div>
+      </aside>
+    </main>
+
+    <section id="viewer" class="viewer hidden">
+      <div class="viewer-mask" id="viewer-close-mask"></div>
+      <div class="viewer-card">
+        <div class="viewer-head">
+          <h3 id="viewer-title">主题预览</h3>
+          <button id="viewer-close">关闭</button>
+        </div>
+        <div id="viewer-body" class="viewer-body"></div>
+      </div>
+    </section>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
