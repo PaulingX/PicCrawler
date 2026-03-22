@@ -4,14 +4,12 @@ from app.database import query_all, query_one
 from app.services.crawler_4khd import Crawler4KHD
 from app.services.crawler_asmhentai import CrawlerAsmhentai
 from app.services.crawler_hitomi import CrawlerHitomi
-from app.services.crawler_manxiangge import CrawlerManxiangge
 from app.services.crawler_wnacg import CrawlerWnacg
 
 _CRAWLER_MAP = {
     "crawler_4khd": Crawler4KHD,
     "crawler_asmhentai": CrawlerAsmhentai,
     "crawler_wnacg": CrawlerWnacg,
-    "crawler_manxiangge": CrawlerManxiangge,
     "crawler_hitomi": CrawlerHitomi,
 }
 
@@ -19,7 +17,6 @@ _CRAWLER_CAPABILITIES = {
     "crawler_4khd": {"supports_search": 1, "categories": []},
     "crawler_asmhentai": {"supports_search": 1, "categories": []},
     "crawler_wnacg": {"supports_search": 1, "categories": [1, 9, 10]},
-    "crawler_manxiangge": {"supports_search": 1, "categories": [2, 4]},
     "crawler_hitomi": {"supports_search": 1, "categories": []},
 }
 

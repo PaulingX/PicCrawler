@@ -115,13 +115,6 @@ DEFAULT_RULES = [
         "enabled": 1,
     },
     {
-        "rule_id": "manxiangge",
-        "name": "漫香阁",
-        "base_url": "https://漫香阁.com/",
-        "crawler": "crawler_manxiangge",
-        "enabled": 1,
-    },
-    {
         "rule_id": "hitomi-chinese",
         "name": "Hitomi 中文",
         "base_url": "https://hitomi.la/index-chinese.html",
@@ -129,6 +122,8 @@ DEFAULT_RULES = [
         "enabled": 1,
     },
 ]
+
+DEPRECATED_RULE_IDS = ["manxiangge"]
 
 
 def _utcnow() -> str:
@@ -195,6 +190,17 @@ def init_db(db_path: Path, download_root: Path) -> None:
 
     with closing(_connect(db_path)) as conn:
         conn.executescript(SCHEMA_SQL)
+
+        for deprecated_rule_id in DEPRECATED_RULE_IDS:
+            conn.execute("DELETE FROM online_topic_cache WHERE rule_id = ?", (deprecated_rule_id,))
+            conn.execute("DELETE FROM online_image_cache WHERE rule_id = ?", (deprecated_rule_id,))
+            conn.execute("DELETE FROM download_jobs WHERE rule_id = ?", (deprecated_rule_id,))
+            conn.execute("DELETE FROM shelves WHERE rule_id = ?", (deprecated_rule_id,))
+            conn.execute("DELETE FROM rules WHERE rule_id = ?", (deprecated_rule_id,))
+            conn.execute(
+                "DELETE FROM settings WHERE setting_key = ?",
+                (f"rule_download_dir:{deprecated_rule_id}",),
+            )
 
         for rule in DEFAULT_RULES:
             conn.execute(
