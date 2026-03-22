@@ -5,6 +5,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import requests
 from flask import Flask
@@ -95,29 +96,12 @@ class DownloadWorker:
 
         for idx, url in enumerate(image_urls, start=1):
             try:
-                headers = {
-                    "User-Agent": USER_AGENT,
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                }
-                if detail_url.startswith("http://") or detail_url.startswith("https://"):
-                    headers["Referer"] = detail_url
-
-                # Retry once with minimal headers for unstable sources.
-                try:
-                    res = session.get(url, timeout=25, stream=True, headers=headers, allow_redirects=True)
-                    res.raise_for_status()
-                except Exception:
-                    res = session.get(
-                        url,
-                        timeout=25,
-                        stream=True,
-                        headers={"User-Agent": USER_AGENT},
-                        allow_redirects=True,
-                    )
-                    res.raise_for_status()
-
-                res.raise_for_status()
-                ext = guess_ext(url)
+                res, final_url = _download_image_with_fallbacks(
+                    session=session,
+                    image_url=url,
+                    referer=detail_url,
+                )
+                ext = guess_ext(final_url)
                 file_path = target / f"{idx:04d}{ext}"
                 with file_path.open("wb") as f:
                     for chunk in res.iter_content(chunk_size=1024 * 64):
@@ -182,6 +166,97 @@ class DownloadWorker:
             """,
             (now,),
         )
+
+
+def _normalize_download_image_url(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+
+    def _rewrite_pic_to_img(path: str, query: str) -> str:
+        return urlunparse(("https", "img.4khd.com", path, "", query, ""))
+
+    if host.endswith(".wp.com"):
+        parts = parsed.path.lstrip("/").split("/", 1)
+        if len(parts) == 2 and "." in parts[0]:
+            origin_host = parts[0].strip().lower()
+            origin_path = "/" + parts[1]
+            if origin_host == "pic.4khd.com":
+                return _rewrite_pic_to_img(origin_path, parsed.query)
+            return urlunparse(("https", origin_host, origin_path, "", parsed.query, ""))
+
+    if host == "pic.4khd.com":
+        return _rewrite_pic_to_img(parsed.path, parsed.query)
+
+    return url
+
+
+def _candidate_download_urls(url: str) -> list[str]:
+    raw = str(url or "").strip()
+    normalized = _normalize_download_image_url(raw)
+    candidates: list[str] = [normalized, raw]
+
+    for item in [normalized, raw]:
+        if not item:
+            continue
+        parsed = urlparse(item)
+        if parsed.scheme == "https":
+            candidates.append(urlunparse(("http", parsed.netloc, parsed.path, "", parsed.query, "")))
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+    return unique
+
+
+def _looks_like_image_response(resp: requests.Response, request_url: str) -> bool:
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    if content_type.startswith("image/"):
+        return True
+
+    parsed = urlparse(request_url)
+    path = (parsed.path or "").lower()
+    return any(path.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"])
+
+
+def _download_image_with_fallbacks(
+    session: requests.Session,
+    image_url: str,
+    referer: str = "",
+) -> tuple[requests.Response, str]:
+    errors: list[str] = []
+    referer_ok = referer.startswith("http://") or referer.startswith("https://")
+
+    for candidate in _candidate_download_urls(image_url):
+        plans = [
+            {
+                "User-Agent": USER_AGENT,
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                **({"Referer": referer} if referer_ok else {}),
+            },
+            {"User-Agent": USER_AGENT},
+        ]
+
+        for headers in plans:
+            try:
+                resp = session.get(candidate, timeout=25, stream=True, headers=headers, allow_redirects=True)
+                resp.raise_for_status()
+                if not _looks_like_image_response(resp, request_url=resp.url or candidate):
+                    content_type = (resp.headers.get("Content-Type") or "").lower()
+                    errors.append(f"{candidate}:not_image:{content_type[:40]}")
+                    resp.close()
+                    continue
+                return resp, (resp.url or candidate)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{candidate}:{exc.__class__.__name__}")
+                continue
+
+    raise RuntimeError(";".join(errors[:8]) or "download failed")
 
 
 def _utcnow() -> str:

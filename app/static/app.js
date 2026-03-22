@@ -634,12 +634,47 @@ function bindBaseEvents() {
     if (state.page <= 1) return;
     state.page -= 1;
     await loadTopics();
+    scrollToTopAfterPaging();
   });
 
   document.getElementById("btn-next").addEventListener("click", async () => {
     state.page += 1;
     await loadTopics();
+    scrollToTopAfterPaging();
   });
+
+  const pageJumpInputEl = document.getElementById("page-jump-input");
+  const pageJumpBtnEl = document.getElementById("btn-page-jump");
+  const doPageJump = async () => {
+    if (!pageJumpInputEl) {
+      return;
+    }
+    const value = Number.parseInt(String(pageJumpInputEl.value || "").trim(), 10);
+    if (!Number.isInteger(value) || value < 1) {
+      showToast("请输入大于等于 1 的页码");
+      return;
+    }
+    if (value === state.page) {
+      scrollToTopAfterPaging();
+      return;
+    }
+    state.page = value;
+    await loadTopics();
+    scrollToTopAfterPaging();
+  };
+
+  if (pageJumpBtnEl) {
+    pageJumpBtnEl.addEventListener("click", async () => {
+      await doPageJump();
+    });
+  }
+  if (pageJumpInputEl) {
+    pageJumpInputEl.addEventListener("keydown", async (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      await doPageJump();
+    });
+  }
 
   document.getElementById("btn-create-shelf").addEventListener("click", async () => {
     const name = document.getElementById("shelf-name").value.trim();
@@ -684,6 +719,30 @@ function bindBaseEvents() {
 
   renderShelfRootsDisplay();
   updateDownloadFab();
+}
+
+function scrollToTopAfterPaging() {
+  if (!state.activeTab || state.activeTab.kind !== "online") {
+    return;
+  }
+  const fallbackTop = 0;
+  const headerBottom =
+    topbarEl && typeof topbarEl.getBoundingClientRect === "function"
+      ? Math.max(0, topbarEl.getBoundingClientRect().bottom + window.scrollY - 8)
+      : fallbackTop;
+  try {
+    window.scrollTo({ top: headerBottom, behavior: "smooth" });
+  } catch (_) {
+    window.scrollTo(0, headerBottom);
+  }
+}
+
+function syncPagerJumpInput() {
+  const pageJumpInputEl = document.getElementById("page-jump-input");
+  if (!pageJumpInputEl || document.activeElement === pageJumpInputEl) {
+    return;
+  }
+  pageJumpInputEl.value = String(state.page);
 }
 
 function renderTabs() {
@@ -988,6 +1047,7 @@ async function loadTopics() {
   }
 
   pageInfoEl.textContent = pageInfo;
+  syncPagerJumpInput();
   renderTopics();
   updateDownloadFab();
 }

@@ -509,6 +509,20 @@ def api_download_topic():
         except Exception as exc:  # noqa: BLE001
             return jsonify({"error": f"下载任务创建失败: {exc}"}), 502
 
+    # Normalize unstable upstream URLs (e.g. 4khd/wp wrappers) for downloader.
+    normalized_urls: list[str] = []
+    seen_download_urls: set[str] = set()
+    for raw_url in image_urls:
+        normalized = _normalize_remote_image_url(str(raw_url or "").strip())
+        resolved = normalized if _is_displayable_image_url(normalized) else str(raw_url or "").strip()
+        if not _is_displayable_image_url(resolved):
+            continue
+        if resolved in seen_download_urls:
+            continue
+        seen_download_urls.add(resolved)
+        normalized_urls.append(resolved)
+    image_urls = normalized_urls
+
     if not image_urls:
         return jsonify({"error": "No image found in topic"}), 400
 

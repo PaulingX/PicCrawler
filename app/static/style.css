@@ -119,11 +119,14 @@ h1 {
   padding: 9px;
   border-radius: 12px;
   backdrop-filter: blur(8px);
+  background: linear-gradient(145deg, rgba(20, 20, 28, 0.64), rgba(12, 12, 18, 0.62));
+  pointer-events: none;
 }
 
 .side-panel h2 {
   font-size: 18px;
   margin-bottom: 6px;
+  opacity: 0.92;
 }
 
 .tabs {
@@ -388,6 +391,7 @@ button:hover {
   align-items: center;
   justify-content: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 #page-info {
@@ -395,10 +399,23 @@ button:hover {
   color: var(--ink-soft);
 }
 
+.pager-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#page-jump-input {
+  width: 76px;
+  min-height: var(--control-h);
+  text-align: center;
+}
+
 .job-list {
   margin-top: 4px;
   display: grid;
   gap: 6px;
+  pointer-events: none;
 }
 
 .queue-summary {
@@ -407,10 +424,10 @@ button:hover {
 }
 
 .job-item {
-  border: 1px solid var(--line);
+  border: 1px solid rgba(214, 171, 104, 0.25);
   border-radius: 12px;
   padding: 6px 8px;
-  background: #101018;
+  background: rgba(16, 16, 24, 0.55);
   font-size: 13px;
 }
 
@@ -770,8 +787,8 @@ button:hover {
     top: auto;
     bottom: calc(8px + env(safe-area-inset-bottom));
     right: 8px;
-    width: min(74vw, 260px);
-    max-height: 30vh;
+    width: min(62vw, 230px);
+    max-height: 24vh;
     order: 2;
   }
 
@@ -906,6 +923,11 @@ button:hover {
 
   .pager button {
     min-width: 78px;
+  }
+
+  #page-jump-input {
+    width: 64px;
+    min-height: 38px;
   }
 
   .viewer-head h3 {
