@@ -5,6 +5,7 @@ import os
 import re
 import math
 import time
+from http.cookies import SimpleCookie
 from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
 
 import requests
@@ -12,6 +13,11 @@ from bs4 import BeautifulSoup
 
 from app.config import USER_AGENT
 from app.services.crawler_base import BaseCrawler
+
+try:
+    import cloudscraper
+except Exception:  # noqa: BLE001
+    cloudscraper = None
 
 _IMAGE_PATTERN = re.compile(
     r"(?:https?:)?\/\/[^\"'\s]+?\.(?:jpg|jpeg|png|webp|gif|avif)(?:\?[^\"'\s]*)?",
@@ -55,6 +61,13 @@ class CrawlerWnacg(BaseCrawler):
         if proxy:
             self.session.proxies.update({"http": proxy, "https": proxy})
 
+        self._cf_session = self._build_cloudflare_session(proxy=proxy)
+        self._cf_warmed = False
+
+        cookie_text = str(os.getenv("PICCRAWLER_WNACG_COOKIE", "")).strip()
+        if cookie_text:
+            self._load_cookie_string(cookie_text)
+
         self._resolved_base_url: str | None = None
 
     def list_topics(self, page_no: int, query: str = "", category_id: int | None = None) -> list[dict]:
@@ -66,11 +79,14 @@ class CrawlerWnacg(BaseCrawler):
             topics = self._list_topics_from_search(keyword=keyword, page_no=page_no)
             if topics:
                 return topics
-            return self._list_topics_from_categories(
-                page_no=page_no,
-                keyword=keyword,
-                category_id=selected_category,
-            )
+            if self._is_search_challenged(keyword=keyword, page_no=page_no):
+                hint = ""
+                if self._cf_session is None:
+                    hint = "，请安装 cloudscraper 或设置 PICCRAWLER_WNACG_COOKIE"
+                raise RuntimeError(f"WNACG 搜索被 Cloudflare 拦截{hint}")
+            # Real no-result search should return empty list; do not fallback
+            # to category filtering, which would produce misleading results.
+            return []
 
         return self._list_topics_from_categories(
             page_no=page_no,
@@ -350,6 +366,20 @@ class CrawlerWnacg(BaseCrawler):
 
         return topics
 
+    def _is_search_challenged(self, keyword: str, page_no: int) -> bool:
+        urls = self._build_search_urls(keyword, page_no)
+        for page_url in urls[:2]:
+            status_code, text = self._request_page(
+                page_url=page_url,
+                timeout=8.0,
+                headers=None,
+            )
+            if self._looks_like_challenge(text, status_code=status_code):
+                return True
+            if status_code == 200 and text.strip():
+                return False
+        return False
+
     def _list_topics_from_categories(self, page_no: int, keyword: str, category_id: int | None = None) -> list[dict]:
         topics: list[dict] = []
         seen_detail_urls: set[str] = set()
@@ -395,18 +425,14 @@ class CrawlerWnacg(BaseCrawler):
     def _build_search_urls(self, keyword: str, page_no: int) -> list[str]:
         base = self._get_base_url()
         q = quote_plus(keyword)
+        common = f"q={q}&f=_all&s=create_time_DESC&syn=yes"
         if page_no <= 1:
-            return [
-                f"{base}search/?q={q}",
-                f"{base}search/index.php?q={q}",
-            ]
+            return [f"{base}search/?{common}"]
 
         return [
-            f"{base}search/?q={q}&p={page_no}",
-            f"{base}search/?q={q}&page={page_no}",
-            f"{base}search/index.php?q={q}&p={page_no}",
-            f"{base}search/index.php?q={q}&page={page_no}",
-            f"{base}search/?q={q}",
+            f"{base}search/?{common}&p={page_no}",
+            f"{base}search/?{common}&page={page_no}",
+            f"{base}search/?{common}",
         ]
 
     def _parse_topics(self, html: str, base_url: str) -> list[dict]:
@@ -535,22 +561,118 @@ class CrawlerWnacg(BaseCrawler):
                     break
                 if idx > 0 or header_idx > 0:
                     time.sleep(0.08)
-                try:
-                    res = self.session.get(candidate, timeout=timeout, headers=headers or None)
-                    res.raise_for_status()
-                except Exception:  # noqa: BLE001
+                status_code, text = self._request_page(
+                    page_url=candidate,
+                    timeout=timeout,
+                    headers=headers,
+                )
+                if text:
+                    last_text = text
+                if self._looks_like_challenge(text, status_code=status_code):
                     continue
-
-                text = res.text or ""
-                last_text = text
-                if self._looks_like_challenge(text, status_code=res.status_code):
+                if status_code >= 500:
                     continue
                 if text:
                     return text
             if attempt_count > max_attempts:
                 break
 
-        return "" if self._looks_like_challenge(last_text, status_code=200) else last_text
+        return last_text
+
+    def _build_cloudflare_session(self, proxy: str) -> requests.Session | None:
+        if cloudscraper is None:
+            return None
+        try:
+            session = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "mobile": False},
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+        session.headers.update(self.session.headers)
+        if proxy:
+            session.proxies.update({"http": proxy, "https": proxy})
+        return session
+
+    def _load_cookie_string(self, cookie_text: str) -> None:
+        jar = SimpleCookie()
+        try:
+            jar.load(cookie_text)
+        except Exception:  # noqa: BLE001
+            return
+
+        for key, morsel in jar.items():
+            value = str(morsel.value or "").strip()
+            if not value:
+                continue
+
+            domain = str(morsel["domain"] or "").strip()
+            path = str(morsel["path"] or "").strip() or "/"
+            if not domain:
+                domain = ".wnacg.com"
+
+            self.session.cookies.set(key, value, domain=domain, path=path)
+            if self._cf_session is not None:
+                self._cf_session.cookies.set(key, value, domain=domain, path=path)
+
+    def _request_page(self, page_url: str, timeout: float, headers: dict[str, str] | None) -> tuple[int, str]:
+        clients: list[requests.Session] = [self.session]
+        if self._cf_session is not None:
+            clients.append(self._cf_session)
+
+        last_status = 0
+        last_text = ""
+        for client in clients:
+            if client is self._cf_session:
+                self._warmup_cloudflare_session(timeout=max(4.0, min(timeout, 10.0)))
+            try:
+                res = client.get(page_url, timeout=timeout, headers=headers or None)
+            except Exception:  # noqa: BLE001
+                continue
+
+            status_code = int(res.status_code or 0)
+            text = res.text or ""
+            if text:
+                last_text = text
+            last_status = status_code
+            self._sync_cookies_from(client)
+
+            if self._looks_like_challenge(text, status_code=status_code):
+                continue
+            if status_code >= 500:
+                continue
+            return status_code, text
+
+        return last_status, last_text
+
+    def _sync_cookies_from(self, source_session: requests.Session) -> None:
+        if source_session is self.session:
+            if self._cf_session is not None:
+                self._cf_session.cookies.update(self.session.cookies)
+            return
+
+        if source_session is self._cf_session:
+            self.session.cookies.update(self._cf_session.cookies)
+
+    def _warmup_cloudflare_session(self, timeout: float) -> None:
+        if self._cf_session is None or self._cf_warmed:
+            return
+        self._cf_warmed = True
+
+        probe_urls = [
+            self.base_url,
+            urljoin(self.base_url, "albums-index-cate-1.html"),
+        ]
+        for probe_url in probe_urls:
+            try:
+                res = self._cf_session.get(probe_url, timeout=timeout)
+            except Exception:  # noqa: BLE001
+                continue
+            self._sync_cookies_from(self._cf_session)
+            status_code = int(res.status_code or 0)
+            text = res.text or ""
+            if status_code == 200 and text.strip() and not self._looks_like_challenge(text, status_code):
+                break
 
     def _build_request_header_variants(self, page_url: str, referer: str = "") -> list[dict[str, str]]:
         parsed_page = urlparse(page_url)

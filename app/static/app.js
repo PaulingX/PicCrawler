@@ -924,9 +924,10 @@ async function loadTopics() {
       const supportsSearch = Number(rule?.supports_search || 0) === 1;
       const query = supportsSearch ? getOnlineQuery(state.activeTab.id) : "";
       const selectedCategory = getOnlineCategory(state.activeTab.id);
+      const skipCategoryOnSearch = state.activeTab.id === "wnacg" && Boolean(query);
 
       let url = `/api/online/topics?rule=${encodeURIComponent(state.activeTab.id)}&page=${state.page}`;
-      if (selectedCategory !== null) {
+      if (!skipCategoryOnSearch && selectedCategory !== null) {
         url += `&category=${encodeURIComponent(selectedCategory)}`;
         pageInfo += ` · 分类: ${getOnlineCategoryLabel(state.activeTab.id, selectedCategory)}`;
       }

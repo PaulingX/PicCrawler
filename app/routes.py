@@ -244,6 +244,10 @@ def api_online_topics():
     query = request.args.get("q", "").strip()
     category_raw = request.args.get("category", "").strip()
     category_id = int(category_raw) if category_raw.isdigit() else None
+    effective_category_id = category_id
+    if rule_id == "wnacg" and query:
+        # WNACG search endpoint is global and should ignore category.
+        effective_category_id = None
 
     if not _is_rule_online_enabled(rule_id):
         return jsonify({"error": "该规则在线浏览已关闭"}), 403
@@ -252,13 +256,15 @@ def api_online_topics():
     try:
         crawler = build_crawler(rule_id)
         # Rules with category browsing should fetch per category directly.
-        use_cache = (not query) and category_id is None and (rule_id not in {"asmhentai-zh", "wnacg", "manxiangge"})
+        use_cache = (not query) and effective_category_id is None and (
+            rule_id not in {"asmhentai-zh", "wnacg", "manxiangge"}
+        )
         if query:
-            if category_id is None:
+            if effective_category_id is None:
                 topics = crawler.list_topics(page_no, query=query)
             else:
                 try:
-                    topics = crawler.list_topics(page_no, query=query, category_id=category_id)
+                    topics = crawler.list_topics(page_no, query=query, category_id=effective_category_id)
                 except TypeError:
                     topics = crawler.list_topics(page_no, query=query)
         elif use_cache:
@@ -267,11 +273,11 @@ def api_online_topics():
                 topics = crawler.list_topics(page_no, query="")
                 _save_topics(rule_id, page_no, topics)
         else:
-            if category_id is None:
+            if effective_category_id is None:
                 topics = crawler.list_topics(page_no, query="")
             else:
                 try:
-                    topics = crawler.list_topics(page_no, query="", category_id=category_id)
+                    topics = crawler.list_topics(page_no, query="", category_id=effective_category_id)
                 except TypeError:
                     topics = crawler.list_topics(page_no, query="")
     except Exception as exc:  # noqa: BLE001
@@ -283,7 +289,7 @@ def api_online_topics():
         item["cover_url"] = _proxy_remote_image_url(item.get("cover_url", ""), item.get("detail_url", ""))
         output.append(item)
 
-    return jsonify({"items": output, "page": page_no, "q": query, "category": category_id})
+    return jsonify({"items": output, "page": page_no, "q": query, "category": effective_category_id})
 
 
 @bp.get("/api/online/topic-images")

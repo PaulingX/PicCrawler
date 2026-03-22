@@ -17,7 +17,7 @@ def _read_port(default: int = 5000) -> int:
 
 
 if __name__ == "__main__":
-    debug_mode = os.getenv("PICCRAWLER_DEBUG", "0") == "1"
+    debug_mode = os.getenv("PICCRAWLER_DEBUG", "1") == "1"
     host = os.getenv("PICCRAWLER_HOST", "0.0.0.0").strip() or "0.0.0.0"
     port = _read_port(5000)
     app.run(host=host, port=port, debug=debug_mode)

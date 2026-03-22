@@ -53,6 +53,16 @@ $env:PICCRAWLER_PROXY="socks5h://127.0.0.1:10808"
 python main.py
 ```
 
+WNACG 若触发 Cloudflare，可选配置：
+```powershell
+# 1) 安装 cloudscraper（已在 requirements.txt 中）
+pip install -r requirements.txt
+
+# 2) 可选：注入浏览器中的 cf_clearance 等 Cookie
+$env:PICCRAWLER_WNACG_COOKIE="cf_clearance=...; __cf_bm=...;"
+python main.py
+```
+
 ### 5、打包 exe
 ```powershell
 # 默认使用 python
