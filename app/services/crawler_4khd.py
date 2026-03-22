@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-from urllib.parse import urljoin, urlparse
+import os
+import re
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,24 +18,49 @@ class Crawler4KHD(BaseCrawler):
     def __init__(self) -> None:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
+        proxy = str(os.getenv("PICCRAWLER_PROXY", "")).strip()
+        if proxy:
+            self.session.proxies.update({"http": proxy, "https": proxy})
 
     def list_topics(self, page_no: int, query: str = "") -> list[dict]:
         page_no = max(1, int(page_no))
-        _ = query
-        page_url = self.base_url if page_no == 1 else urljoin(self.base_url, f"page/{page_no}/")
-        res = self.session.get(page_url, timeout=20)
-        res.raise_for_status()
+        keyword = str(query or "").strip()
 
-        soup = BeautifulSoup(res.text, "html.parser")
+        for page_url in self._build_list_urls(page_no=page_no, keyword=keyword):
+            try:
+                res = self.session.get(page_url, timeout=20)
+                res.raise_for_status()
+            except Exception:  # noqa: BLE001
+                continue
+
+            topics = self._parse_topics_from_html(res.text or "")
+            if topics:
+                return topics
+
+        return []
+
+    def _build_list_urls(self, page_no: int, keyword: str) -> list[str]:
+        if keyword:
+            encoded = quote(keyword, safe="")
+            if page_no <= 1:
+                return [urljoin(self.base_url, f"search/{encoded}")]
+            return [
+                urljoin(self.base_url, f"search/{encoded}/page/{page_no}/"),
+                urljoin(self.base_url, f"search/{encoded}"),
+            ]
+
+        if page_no <= 1:
+            return [self.base_url]
+        return [urljoin(self.base_url, f"page/{page_no}/")]
+
+    def _parse_topics_from_html(self, html: str) -> list[dict]:
+        soup = BeautifulSoup(html, "html.parser")
         topics: list[dict] = []
         seen: set[str] = set()
 
         containers = soup.select("article, .post, .entry, .item, li")
         for node in containers:
-            anchor = (
-                node.select_one("h1 a, h2 a, h3 a, .entry-title a")
-                or node.select_one("a[href]")
-            )
+            anchor = node.select_one("h1 a, h2 a, h3 a, .entry-title a") or node.select_one("a[href]")
             if not anchor:
                 continue
 
@@ -63,7 +90,6 @@ class Crawler4KHD(BaseCrawler):
                     "detail_url": detail_url,
                 }
             )
-
             if len(topics) >= 80:
                 break
 
@@ -73,38 +99,144 @@ class Crawler4KHD(BaseCrawler):
         detail_url = urljoin(self.base_url, detail_url)
         res = self.session.get(detail_url, timeout=20)
         res.raise_for_status()
+        first_html = res.text or ""
+        first_soup = BeautifulSoup(first_html, "html.parser")
 
-        soup = BeautifulSoup(res.text, "html.parser")
+        page_urls = self._collect_topic_page_urls(detail_url=detail_url, first_soup=first_soup)
         image_urls: list[str] = []
         seen: set[str] = set()
 
+        for page_url in page_urls:
+            if page_url == detail_url:
+                soup = first_soup
+            else:
+                try:
+                    page_res = self.session.get(page_url, timeout=20)
+                    page_res.raise_for_status()
+                except Exception:  # noqa: BLE001
+                    continue
+                soup = BeautifulSoup(page_res.text or "", "html.parser")
+
+            for image_url in self._extract_topic_images_from_soup(soup=soup, base_url=page_url):
+                if image_url in seen:
+                    continue
+                seen.add(image_url)
+                image_urls.append(image_url)
+
+        return image_urls
+
+    def topic_image_count(self, detail_url: str) -> int:
+        detail_url = urljoin(self.base_url, detail_url)
+        try:
+            res = self.session.get(detail_url, timeout=20)
+            res.raise_for_status()
+        except Exception:  # noqa: BLE001
+            return 0
+
+        html = res.text or ""
+        soup = BeautifulSoup(html, "html.parser")
+
+        text_candidates = [
+            (soup.title.get_text(" ", strip=True) if soup.title else ""),
+            str(soup.select_one("h1").get_text(" ", strip=True) if soup.select_one("h1") else ""),
+            html[:5000],
+        ]
+        for text in text_candidates:
+            if not text:
+                continue
+            match = re.search(r"(\d+)\s*photos?", text, re.IGNORECASE)
+            if match:
+                try:
+                    total = int(match.group(1))
+                    if total > 0:
+                        return total
+                except ValueError:
+                    pass
+
+        # fallback: expensive but accurate
+        return len(self.topic_images(detail_url))
+
+    def _collect_topic_page_urls(self, detail_url: str, first_soup: BeautifulSoup) -> list[str]:
+        base = detail_url.rstrip("/")
+        if not base:
+            return [detail_url]
+
+        page_numbers: set[int] = {1}
+        parsed = urlparse(base)
+        base_path = parsed.path.rstrip("/")
+        base_path_slash = f"{base_path}/"
+
+        for anchor in first_soup.select("a[href]"):
+            href = str(anchor.get("href") or "").strip()
+            if not href:
+                continue
+
+            full = urljoin(detail_url, href).split("#", 1)[0]
+            parsed_full = urlparse(full)
+            if parsed_full.netloc != parsed.netloc:
+                continue
+
+            path = parsed_full.path.rstrip("/")
+            if not path.startswith(base_path_slash):
+                continue
+
+            suffix = path[len(base_path_slash) :]
+            if not suffix.isdigit():
+                continue
+
+            page_no = int(suffix)
+            if page_no > 1:
+                page_numbers.add(page_no)
+
+        return [base] + [f"{base}/{page_no}" for page_no in sorted(page_numbers) if page_no > 1]
+
+    def _extract_topic_images_from_soup(self, soup: BeautifulSoup, base_url: str) -> list[str]:
         selectors = [
             ".entry-content img",
             ".post-content img",
             ".single-content img",
             ".article-content img",
-            "main img",
             "article img",
+            "main img",
             "img",
         ]
 
+        images: list[str] = []
+        seen: set[str] = set()
         for selector in selectors:
-            for image in soup.select(selector):
-                full = self._extract_image_url(image, detail_url)
+            nodes = soup.select(selector)
+            if not nodes:
+                continue
+            for image in nodes:
+                full = self._extract_image_url(image, base_url)
                 if not full:
                     continue
-                lower = full.lower()
-                if any(key in lower for key in ["avatar", "logo", "icon", "emoji"]):
+                if not self._is_valid_topic_image_url(full):
                     continue
                 if full in seen:
                     continue
                 seen.add(full)
-                image_urls.append(full)
-
-            if image_urls:
+                images.append(full)
+            if images:
                 break
+        return images
 
-        return image_urls
+    def _is_valid_topic_image_url(self, url: str) -> bool:
+        if not self._is_valid_image_url(url):
+            return False
+
+        lower = url.lower()
+        if any(key in lower for key in ["avatar", "logo", "icon", "emoji"]):
+            return False
+        if "4khd-beautifulgirls.webp" in lower:
+            return False
+        if "yt4.googleusercontent.com/-" not in lower and "4khd.com-" not in lower:
+            # Avoid unrelated site template images.
+            return False
+
+        parsed = urlparse(lower)
+        path = parsed.path or ""
+        return bool(re.search(r"\.(jpg|jpeg|png|webp|gif|avif)$", path))
 
     def _extract_image_url(self, image, base_url: str) -> str:
         candidates: list[str] = []
@@ -152,9 +284,9 @@ class Crawler4KHD(BaseCrawler):
             return False
         if path.startswith("/page"):
             return False
-        if any(path.startswith(prefix) for prefix in ["/tag", "/category", "/author", "/wp-"]):
+        if any(path.startswith(prefix) for prefix in ["/tag", "/category", "/author", "/search", "/wp-"]):
             return False
 
-        return True
+        return path.startswith("/content/")
 
 

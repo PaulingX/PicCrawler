@@ -14,7 +14,7 @@ from urllib.parse import quote, urlparse, urlunparse
 import requests
 from requests import Response as RequestsResponse
 from requests.exceptions import RequestException
-from flask import Blueprint, abort, current_app, jsonify, redirect, render_template, request, send_file, Response
+from flask import Blueprint, abort, current_app, jsonify, render_template, request, send_file, Response
 
 from app.config import USER_AGENT
 from app.database import execute, query_all, query_one, setting_get, setting_set
@@ -438,9 +438,6 @@ def api_online_image_proxy():
 
     resp, warn = _fetch_image_with_fallbacks(image_url=image_url, referer=referer)
     if resp is None:
-        fallback_url = _pick_direct_redirect_url(image_url)
-        if fallback_url:
-            return redirect(fallback_url, code=302)
         return jsonify({"error": f"image proxy failed: {warn}"}), 502
 
     content_type = resp.headers.get("Content-Type", "image/jpeg")
@@ -861,6 +858,7 @@ def _cached_images_need_refresh(rule_id: str, urls: list[str]) -> bool:
 
 
 def _get_or_fetch_images(rule_id: str, topic_id: str, detail_url: str) -> list[str]:
+    crawler = None
     rows = query_all(
         """
         SELECT image_url
@@ -873,10 +871,23 @@ def _get_or_fetch_images(rule_id: str, topic_id: str, detail_url: str) -> list[s
     if rows:
         cached = [str(r["image_url"]) for r in rows]
         cached = [u for u in cached if _is_displayable_image_url(u)]
+        # 4KHD previously cached only first page images; compare with declared
+        # gallery total to auto-refresh stale cache.
+        if rule_id == "4khd" and cached:
+            try:
+                crawler = build_crawler(rule_id)
+                count_fetcher = getattr(crawler, "topic_image_count", None)
+                if callable(count_fetcher):
+                    declared_count = max(0, int(count_fetcher(detail_url)))
+                    if declared_count > len(cached):
+                        cached = []
+            except Exception:  # noqa: BLE001
+                pass
         if cached and not _cached_images_need_refresh(rule_id, cached):
             return cached
 
-    crawler = build_crawler(rule_id)
+    if crawler is None:
+        crawler = build_crawler(rule_id)
     raw_images = crawler.topic_images(detail_url)
 
     preferred: list[str] = []
@@ -935,13 +946,21 @@ def _normalize_remote_image_url(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
 
+    def _rewrite_pic_to_img(path: str, query: str) -> str:
+        return urlunparse(("https", "img.4khd.com", path, "", query, ""))
+
     # WordPress CDN wrapper: i0.wp.com/<origin-host>/<path>?w=1300
     if host.endswith(".wp.com"):
         parts = parsed.path.lstrip("/").split("/", 1)
         if len(parts) == 2 and "." in parts[0]:
             origin_host = parts[0].strip().lower()
             origin_path = "/" + parts[1]
-            return urlunparse(("https", origin_host, origin_path, "", "", ""))
+            if origin_host == "pic.4khd.com":
+                return _rewrite_pic_to_img(origin_path, parsed.query)
+            return urlunparse(("https", origin_host, origin_path, "", parsed.query, ""))
+
+    if host == "pic.4khd.com":
+        return _rewrite_pic_to_img(parsed.path, parsed.query)
 
     return url
 
@@ -994,8 +1013,9 @@ def _proxy_remote_image_url(image_url: str, referer: str = "") -> str:
     if image_url.startswith("/api/online/image-proxy"):
         return image_url
 
-    display_url = _prefer_display_image_url(image_url)
-    encoded = quote(display_url, safe="")
+    normalized = _normalize_remote_image_url(image_url)
+    target_url = normalized if _is_displayable_image_url(normalized) else image_url
+    encoded = quote(target_url, safe="")
     if referer:
         encoded_ref = quote(referer, safe="")
         return f"/api/online/image-proxy?url={encoded}&referer={encoded_ref}"
@@ -1053,9 +1073,10 @@ def _candidate_fetch_urls(image_url: str) -> list[str]:
     wrapped = _wrap_wp_proxy_url(normalized)
     display = _prefer_display_image_url(raw)
 
-    candidates: list[str] = [display, raw, wrapped, normalized]
+    # Prefer origin/normalized URL first; wp.com wrapper is only fallback.
+    candidates: list[str] = [normalized, raw, wrapped, display]
 
-    for u in [display, raw, wrapped, normalized]:
+    for u in [normalized, raw, wrapped, display]:
         if u and urlparse(u).scheme == "https":
             candidates.append(_http_fallback_url(u))
 

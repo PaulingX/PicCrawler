@@ -384,6 +384,33 @@ function buildImageProxyUrl(url, referer = "") {
   return `/api/online/image-proxy?url=${encodedUrl}`;
 }
 
+function normalizeProxyRawImageUrl(rawUrl) {
+  const value = (rawUrl || "").trim();
+  if (!value) {
+    return "";
+  }
+  try {
+    const parsed = new URL(value, window.location.origin);
+    const host = (parsed.hostname || "").toLowerCase();
+    if (host.endsWith(".wp.com")) {
+      const path = (parsed.pathname || "").replace(/^\/+/, "");
+      const slash = path.indexOf("/");
+      if (slash > 0) {
+        const originHost = path.slice(0, slash).trim().toLowerCase();
+        const originPath = path.slice(slash);
+        if (originHost.includes(".")) {
+          const out = new URL(`https://${originHost}${originPath}`);
+          out.search = parsed.search || "";
+          return out.toString();
+        }
+      }
+    }
+    return parsed.toString();
+  } catch (_) {
+    return value;
+  }
+}
+
 function ensureActiveTab() {
   const onlineRules = getEnabledOnlineRules();
   const onlineRuleIds = new Set(onlineRules.map((r) => r.rule_id));
@@ -429,8 +456,14 @@ function fallbackProxyImage(imgEl) {
     if (!raw) {
       return false;
     }
+    const referer = parsed.searchParams.get("referer") || "";
+    const normalizedRaw = normalizeProxyRawImageUrl(raw);
+    const retryProxyUrl = buildImageProxyUrl(normalizedRaw || raw, referer);
+    if (!retryProxyUrl || retryProxyUrl === imgEl.src) {
+      return false;
+    }
     imgEl.dataset.proxyFallbackTried = "1";
-    imgEl.src = raw;
+    imgEl.src = retryProxyUrl;
     imgEl.referrerPolicy = "no-referrer";
     return true;
   } catch (_) {
@@ -975,8 +1008,10 @@ function renderTopics() {
     const cover = topic.cover_url || "";
     const title = topic.title || "未命名主题";
     const isOnline = state.activeTab.kind === "online";
+    const hideCount = isOnline && state.activeTab.id === "4khd";
     const countText = isOnline
       ? (() => {
+          if (hideCount) return "";
           const count = getTopicCount(state.activeTab.id, topic.topic_id);
           return count === null ? "统计中..." : `${count} 张`;
         })()
@@ -988,9 +1023,13 @@ function renderTopics() {
         <div class="card-title">${escapeHtml(title)}</div>
         <div class="card-meta">${isOnline ? "规则主题" : `路径: ${escapeHtml(topic.rel_path || ".")}`}</div>
         <div class="card-row">
-          <span class="topic-count" data-rule-id="${isOnline ? escapeHtml(state.activeTab.id) : ""}" data-topic-id="${
-            isOnline ? escapeHtml(topic.topic_id) : ""
-          }">${escapeHtml(countText)}</span>
+          ${
+            hideCount
+              ? ""
+              : `<span class="topic-count" data-rule-id="${isOnline ? escapeHtml(state.activeTab.id) : ""}" data-topic-id="${
+                  isOnline ? escapeHtml(topic.topic_id) : ""
+                }">${escapeHtml(countText)}</span>`
+          }
           ${
             isOnline
               ? `<label class="selection-wrap"><input class="chk-topic" type="checkbox" ${selectedSet.has(topic.topic_id) ? "checked" : ""} /> 选中</label>`
@@ -1028,9 +1067,11 @@ function renderTopics() {
         }
         updateDownloadFab();
       });
-      ensureOnlineTopicCount(state.activeTab.id, topic).catch(() => {
-        // no-op
-      });
+      if (!hideCount) {
+        ensureOnlineTopicCount(state.activeTab.id, topic).catch(() => {
+          // no-op
+        });
+      }
     }
 
     topicGridEl.appendChild(card);
