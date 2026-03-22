@@ -5,9 +5,10 @@ import os
 import re
 import struct
 import time
+import hashlib
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, unquote
 
 import requests
 from bs4 import BeautifulSoup
@@ -19,6 +20,8 @@ _GALLERY_ID_PATTERN = re.compile(r"(?:/reader/|/galleries/)(\d+)(?:\.html)?", re
 _NOZOMI_INT_SIZE = 4
 _DEFAULT_GG_BASE = "1774080001/"
 _IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "avif"}
+_SEARCH_NODE_SIZE = 464
+_SEARCH_B = 16
 
 
 @dataclass
@@ -54,6 +57,7 @@ class CrawlerHitomi(BaseCrawler):
         "ltn.gold-usergeneratedcontent.net",
         "ltn.hitomi.la",
     )
+    search_domain = "ltn.gold-usergeneratedcontent.net"
 
     def __init__(self) -> None:
         self.session = requests.Session()
@@ -73,9 +77,19 @@ class CrawlerHitomi(BaseCrawler):
             "at": 0.0,
             "params": _GgParams(base_prefix=_DEFAULT_GG_BASE, zero_cases=set()),
         }
+        self._search_versions: dict[str, Any] = {"at": 0.0, "data": {}}
+        self._search_term_cache: dict[str, list[int]] = {}
 
     def list_topics(self, page_no: int, query: str = "") -> list[dict]:
         page_no = max(1, int(page_no))
+        normalized_query = self._normalize_search_query(query)
+        if normalized_query:
+            ids = self._search_gallery_ids(normalized_query)
+            start = (page_no - 1) * self.page_size
+            end = start + self.page_size
+            page_ids = ids[start:end]
+            return self._topics_from_ids(page_ids, include_meta=False)
+
         plan = self._parse_query(query)
         page_offset = (page_no - 1) * self.page_size
 
@@ -124,6 +138,340 @@ class CrawlerHitomi(BaseCrawler):
                 break
 
         return matched[page_offset : page_offset + self.page_size]
+
+    def _normalize_search_query(self, query: str) -> str:
+        text = str(query or "").strip()
+        if not text:
+            return ""
+
+        lower = text.lower()
+        if "hitomi.la/search.html?" in lower:
+            text = text.split("?", 1)[-1].strip()
+
+        # Frontend may pass a decoded query; users may also paste encoded form.
+        if "%" in text:
+            try:
+                decoded = unquote(text)
+                if decoded and decoded != text:
+                    text = decoded
+            except Exception:  # noqa: BLE001
+                pass
+
+        return text.strip()
+
+    def _search_gallery_ids(self, query: str) -> list[int]:
+        terms = [t.replace("_", " ").strip().lower() for t in query.strip().split() if t.strip()]
+        if not terms:
+            return []
+
+        state = {
+            "area": "all",
+            "tag": "index",
+            "language": "chinese",
+            "orderby": "date",
+            "orderbykey": "added",
+            "orderbydirection": "desc",
+        }
+
+        positive_terms: list[str] = []
+        negative_terms: list[str] = []
+        for term in terms:
+            if re.match(r"^(?:sort|order)by(?:key|direction)?:", term):
+                left_side, right_side = (term.split(":", 1) + [""])[:2]
+                if re.match(r"^(?:sort|order)(?:by)?key$", left_side):
+                    state["orderbykey"] = re.sub(r"[^0-9a-z]", "", right_side)
+                elif right_side in {"popular", "popularity"}:
+                    state["orderby"] = "popular"
+                elif right_side == "date":
+                    state["orderby"] = "date"
+                elif right_side == "datepublished":
+                    state["orderby"] = "date"
+                    state["orderbykey"] = "published"
+                elif re.match(r"^(?:sort|order)by$", left_side) and right_side in {"random", "rand"}:
+                    state["orderbydirection"] = "random"
+                elif left_side in {"orderbydirection", "sortbydirection"}:
+                    state["orderbydirection"] = re.sub(r"[^0-9a-z]", "", right_side)
+                continue
+
+            if term == "or":
+                continue
+
+            if term.startswith("-"):
+                token = term[1:].strip()
+                if token:
+                    negative_terms.append(token)
+            else:
+                positive_terms.append(term)
+
+        positive_terms.sort(key=lambda t: 0 if ":" in t else 1)
+        if state["orderbykey"] == "":
+            state["orderbykey"] = "year" if state["orderby"] == "popular" else "added"
+
+        if not positive_terms or (":" not in positive_terms[0] and state["orderbykey"] != "added"):
+            results = self._get_galleryids_from_nozomi_state(state)
+        else:
+            first = positive_terms.pop(0)
+            results = self._get_galleryids_for_query_term(first, state)
+
+        for term in positive_terms:
+            subset = set(self._get_galleryids_for_query_term(term, state))
+            if not subset:
+                return []
+            results = [gallery_id for gallery_id in results if gallery_id in subset]
+            if not results:
+                return []
+
+        for term in negative_terms:
+            excluded = set(self._get_galleryids_for_query_term(term, state))
+            if not excluded:
+                continue
+            results = [gallery_id for gallery_id in results if gallery_id not in excluded]
+            if not results:
+                return []
+
+        return results
+
+    def _get_galleryids_for_query_term(self, query_term: str, state: dict[str, str]) -> list[int]:
+        term = query_term.replace("_", " ").strip().lower()
+        if not term:
+            return []
+
+        if ":" in term:
+            left_side, right_side = (term.split(":", 1) + [""])[:2]
+            scoped_state = dict(state)
+            if left_side in {"female", "male"}:
+                scoped_state["area"] = "tag"
+                scoped_state["tag"] = term
+            elif left_side == "language":
+                scoped_state["language"] = right_side.strip() or state.get("language", "chinese")
+            else:
+                scoped_state["area"] = left_side.strip() or "all"
+                scoped_state["tag"] = right_side.strip() or "index"
+            return self._get_galleryids_from_nozomi_state(scoped_state)
+
+        return self._get_galleryids_for_free_term(term)
+
+    def _get_galleryids_for_free_term(self, term: str) -> list[int]:
+        cache_key = term.strip().lower()
+        if cache_key in self._search_term_cache:
+            return list(self._search_term_cache[cache_key])
+
+        key = hashlib.sha256(cache_key.encode("utf-8")).digest()[:4]
+        versions = self._get_search_versions()
+        index_version = str(versions.get("galleriesindex") or "").strip()
+        if not index_version:
+            return []
+
+        root = self._fetch_search_node(field="galleries", version=index_version, address=0)
+        data_entry = self._search_btree(field="galleries", version=index_version, key=key, node=root)
+        ids = self._read_galleryids_from_data(version=index_version, data_entry=data_entry)
+
+        if len(self._search_term_cache) > 120:
+            self._search_term_cache.clear()
+        self._search_term_cache[cache_key] = list(ids)
+        return ids
+
+    def _get_galleryids_from_nozomi_state(self, state: dict[str, str]) -> list[int]:
+        area = str(state.get("area") or "all").strip().lower() or "all"
+        tag = str(state.get("tag") or "index").strip().lower() or "index"
+        language = str(state.get("language") or "chinese").strip().lower() or "chinese"
+        orderby = str(state.get("orderby") or "date").strip().lower() or "date"
+        orderbykey = str(state.get("orderbykey") or "added").strip().lower() or "added"
+
+        if orderby != "date" or orderbykey == "published":
+            if area == "all":
+                path = f"n/{orderby}/{orderbykey}-{language}.nozomi"
+            else:
+                path = f"n/{area}/{orderby}/{orderbykey}/{tag}-{language}.nozomi"
+        elif area == "all":
+            path = f"n/{tag}-{language}.nozomi"
+        else:
+            path = f"n/{area}/{tag}-{language}.nozomi"
+
+        url = f"https://{self.search_domain}/{path}"
+        return self._fetch_nozomi_all(url)
+
+    def _fetch_nozomi_all(self, nozomi_url: str) -> list[int]:
+        try:
+            resp = self.session.get(
+                nozomi_url,
+                timeout=12,
+                allow_redirects=True,
+                headers={"Referer": self.base_url},
+            )
+        except Exception:  # noqa: BLE001
+            return []
+
+        if resp.status_code != 200:
+            return []
+
+        payload = resp.content or b""
+        usable = len(payload) - (len(payload) % _NOZOMI_INT_SIZE)
+        if usable < _NOZOMI_INT_SIZE:
+            return []
+
+        ids: list[int] = []
+        for idx in range(0, usable, _NOZOMI_INT_SIZE):
+            (gallery_id,) = struct.unpack(">I", payload[idx : idx + _NOZOMI_INT_SIZE])
+            if gallery_id > 0:
+                ids.append(int(gallery_id))
+        return ids
+
+    def _get_search_versions(self) -> dict[str, str]:
+        now = time.time()
+        cached_at = float(self._search_versions.get("at") or 0.0)
+        cached_data = self._search_versions.get("data")
+        if now - cached_at <= 3600 and isinstance(cached_data, dict) and cached_data:
+            return dict(cached_data)
+
+        data: dict[str, str] = {}
+        for name in ("galleriesindex", "languagesindex", "nozomiurlindex"):
+            url = f"https://{self.search_domain}/{name}/version"
+            text = self._get_text(url, referer=self.base_url).strip()
+            if text and re.fullmatch(r"\d{6,20}", text):
+                data[name] = text
+
+        if data:
+            self._search_versions["at"] = now
+            self._search_versions["data"] = dict(data)
+            return data
+
+        if isinstance(cached_data, dict):
+            return dict(cached_data)
+        return {}
+
+    def _fetch_search_node(self, field: str, version: str, address: int) -> dict | None:
+        index_url = f"https://{self.search_domain}/galleriesindex/{field}.{version}.index"
+        payload = self._range_get(index_url, address, address + _SEARCH_NODE_SIZE - 1)
+        if not payload:
+            return None
+        return self._decode_search_node(payload)
+
+    def _decode_search_node(self, payload: bytes) -> dict | None:
+        try:
+            view = memoryview(payload)
+            pos = 0
+            number_of_keys = int.from_bytes(view[pos : pos + 4], "big", signed=True)
+            pos += 4
+
+            if number_of_keys < 0 or number_of_keys > 256:
+                return None
+
+            keys: list[bytes] = []
+            for _ in range(number_of_keys):
+                key_size = int.from_bytes(view[pos : pos + 4], "big", signed=True)
+                pos += 4
+                if key_size <= 0 or key_size > 32:
+                    return None
+                keys.append(bytes(view[pos : pos + key_size]))
+                pos += key_size
+
+            number_of_datas = int.from_bytes(view[pos : pos + 4], "big", signed=True)
+            pos += 4
+            if number_of_datas < 0 or number_of_datas > 256:
+                return None
+
+            datas: list[tuple[int, int]] = []
+            for _ in range(number_of_datas):
+                offset = int.from_bytes(view[pos : pos + 8], "big", signed=False)
+                pos += 8
+                length = int.from_bytes(view[pos : pos + 4], "big", signed=True)
+                pos += 4
+                datas.append((int(offset), int(length)))
+
+            subnodes: list[int] = []
+            for _ in range(_SEARCH_B + 1):
+                sub_addr = int.from_bytes(view[pos : pos + 8], "big", signed=False)
+                pos += 8
+                subnodes.append(int(sub_addr))
+
+            return {"keys": keys, "datas": datas, "subnodes": subnodes}
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _search_btree(self, field: str, version: str, key: bytes, node: dict | None) -> tuple[int, int] | None:
+        current = node
+        while current:
+            keys = list(current.get("keys") or [])
+            datas = list(current.get("datas") or [])
+            subnodes = list(current.get("subnodes") or [])
+            if not keys:
+                return None
+
+            idx = 0
+            cmp_result = -1
+            for idx, existing in enumerate(keys):
+                if key < existing:
+                    cmp_result = -1
+                    break
+                if key == existing:
+                    cmp_result = 0
+                    break
+                cmp_result = 1
+            else:
+                idx = len(keys)
+
+            if cmp_result == 0:
+                if idx < len(datas):
+                    return datas[idx]
+                return None
+
+            if idx >= len(subnodes):
+                return None
+            next_address = int(subnodes[idx] or 0)
+            if next_address <= 0:
+                return None
+            current = self._fetch_search_node(field=field, version=version, address=next_address)
+        return None
+
+    def _read_galleryids_from_data(self, version: str, data_entry: tuple[int, int] | None) -> list[int]:
+        if not data_entry:
+            return []
+
+        offset, length = data_entry
+        if length <= 0 or length > 150_000_000:
+            return []
+
+        data_url = f"https://{self.search_domain}/galleriesindex/galleries.{version}.data"
+        payload = self._range_get(data_url, offset, offset + length - 1)
+        if not payload or len(payload) < 8:
+            return []
+
+        view = memoryview(payload)
+        number_of_galleryids = int.from_bytes(view[0:4], "big", signed=True)
+        if number_of_galleryids <= 0:
+            return []
+
+        expected_length = 4 + number_of_galleryids * 4
+        if expected_length > len(payload):
+            return []
+
+        ids: list[int] = []
+        pos = 4
+        for _ in range(number_of_galleryids):
+            gallery_id = int.from_bytes(view[pos : pos + 4], "big", signed=True)
+            pos += 4
+            if gallery_id > 0:
+                ids.append(int(gallery_id))
+        return ids
+
+    def _range_get(self, url: str, start: int, end: int) -> bytes:
+        try:
+            resp = self.session.get(
+                url,
+                timeout=12,
+                allow_redirects=True,
+                headers={
+                    "Range": f"bytes={max(0, int(start))}-{max(int(start), int(end))}",
+                    "Referer": self.base_url,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            return b""
+
+        if resp.status_code not in {200, 206}:
+            return b""
+        return bytes(resp.content or b"")
 
     def topic_images(self, detail_url: str) -> list[str]:
         gallery_id = self._extract_gallery_id(detail_url)
