@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -40,12 +40,37 @@ class CrawlerAsmhentai(BaseCrawler):
 
     def list_topics(self, page_no: int, query: str = "") -> list[dict]:
         page_no = max(1, int(page_no))
-        _ = query
-        page_url = self.base_url if page_no == 1 else urljoin(self.base_url, f"?page={page_no}")
+        keyword = query.strip()
+        for page_url in self._build_list_urls(page_no=page_no, keyword=keyword):
+            try:
+                res = self.session.get(page_url, timeout=25)
+                res.raise_for_status()
+            except Exception:  # noqa: BLE001
+                continue
 
-        res = self.session.get(page_url, timeout=25)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
+            topics = self._parse_topics_from_html(res.text or "")
+            if topics:
+                return topics
+
+        return []
+
+    def _build_list_urls(self, page_no: int, keyword: str) -> list[str]:
+        if keyword:
+            q = quote_plus(keyword)
+            if page_no <= 1:
+                return [f"https://asmhentai.com/search/?q={q}"]
+            return [
+                f"https://asmhentai.com/search/?q={q}&page={page_no}",
+                f"https://asmhentai.com/search/?q={q}&p={page_no}",
+                f"https://asmhentai.com/search/?q={q}",
+            ]
+
+        if page_no <= 1:
+            return [self.base_url]
+        return [urljoin(self.base_url, f"?page={page_no}")]
+
+    def _parse_topics_from_html(self, html: str) -> list[dict]:
+        soup = BeautifulSoup(html, "html.parser")
 
         topics: list[dict] = []
         seen: set[str] = set()
