@@ -1008,10 +1008,8 @@ function renderTopics() {
     const cover = topic.cover_url || "";
     const title = topic.title || "未命名主题";
     const isOnline = state.activeTab.kind === "online";
-    const hideCount = isOnline && state.activeTab.id === "4khd";
     const countText = isOnline
       ? (() => {
-          if (hideCount) return "";
           const count = getTopicCount(state.activeTab.id, topic.topic_id);
           return count === null ? "统计中..." : `${count} 张`;
         })()
@@ -1023,13 +1021,9 @@ function renderTopics() {
         <div class="card-title">${escapeHtml(title)}</div>
         <div class="card-meta">${isOnline ? "规则主题" : `路径: ${escapeHtml(topic.rel_path || ".")}`}</div>
         <div class="card-row">
-          ${
-            hideCount
-              ? ""
-              : `<span class="topic-count" data-rule-id="${isOnline ? escapeHtml(state.activeTab.id) : ""}" data-topic-id="${
-                  isOnline ? escapeHtml(topic.topic_id) : ""
-                }">${escapeHtml(countText)}</span>`
-          }
+          <span class="topic-count" data-rule-id="${isOnline ? escapeHtml(state.activeTab.id) : ""}" data-topic-id="${
+            isOnline ? escapeHtml(topic.topic_id) : ""
+          }">${escapeHtml(countText)}</span>
           ${
             isOnline
               ? `<label class="selection-wrap"><input class="chk-topic" type="checkbox" ${selectedSet.has(topic.topic_id) ? "checked" : ""} /> 选中</label>`
@@ -1067,11 +1061,9 @@ function renderTopics() {
         }
         updateDownloadFab();
       });
-      if (!hideCount) {
-        ensureOnlineTopicCount(state.activeTab.id, topic).catch(() => {
-          // no-op
-        });
-      }
+      ensureOnlineTopicCount(state.activeTab.id, topic).catch(() => {
+        // no-op
+      });
     }
 
     topicGridEl.appendChild(card);
