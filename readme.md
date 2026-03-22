@@ -39,6 +39,14 @@ python main.py
 
 浏览器打开：`http://127.0.0.1:5000`
 
+局域网访问（同一网络设备）：
+- `http://<本机IP>:5000`，例如：`http://192.168.1.33:5000`
+- 默认监听：`0.0.0.0:5000`
+- 可选环境变量：
+  - `PICCRAWLER_HOST`（默认 `0.0.0.0`）
+  - `PICCRAWLER_PORT`（默认 `5000`）
+- 若局域网仍无法访问，请放行 Windows 防火墙入站端口 `5000`。
+
 如部分站点在当前网络无法访问（如 ASMHentai / 漫香阁 / Hitomi），可在启动前设置代理：
 ```powershell
 $env:PICCRAWLER_PROXY="socks5h://127.0.0.1:10808"

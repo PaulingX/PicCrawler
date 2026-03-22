@@ -11,6 +11,7 @@ from flask import Flask
 
 from app.config import USER_AGENT
 from app.database import execute
+from app.services.library_scanner import upsert_downloaded_topic
 from app.services.utils import guess_ext, sanitize_name
 
 
@@ -58,6 +59,7 @@ class DownloadWorker:
         self._queue.put(
             {
                 "job_id": job_id,
+                "rule_id": rule_id,
                 "title": title,
                 "target_dir": target_dir,
                 "detail_url": detail_url,
@@ -139,13 +141,29 @@ class DownloadWorker:
         if downloaded == 0:
             final_status = "failed"
 
+        sync_error = ""
+        if downloaded > 0:
+            try:
+                upsert_downloaded_topic(
+                    rule_id=str(task.get("rule_id", "")).strip(),
+                    root_dir=str(task["target_dir"]),
+                    topic_dir=str(target),
+                    title_hint=str(task.get("title", "")).strip(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                sync_error = f"书架自动入库失败: {exc}"
+
+        merged_errors = "\n".join(errors[:20]) if errors else ""
+        if sync_error:
+            merged_errors = f"{merged_errors}\n{sync_error}".strip()
+
         execute(
             """
             UPDATE download_jobs
             SET status=?, error_message=?, updated_at=?
             WHERE job_id=?
             """,
-            (final_status, "\n".join(errors[:20]) if errors else "", _utcnow(), job_id),
+            (final_status, merged_errors, _utcnow(), job_id),
         )
 
     def _recover_interrupted_jobs(self) -> None:

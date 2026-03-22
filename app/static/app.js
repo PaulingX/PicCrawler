@@ -7,6 +7,7 @@ const state = {
   newShelfRoots: [],
   selectedTopics: new Map(),
   onlineSearch: new Map(),
+  localSearch: new Map(),
   onlineCategory: new Map(),
   topicImageCache: new Map(),
   topicCounts: new Map(),
@@ -19,6 +20,12 @@ const state = {
     loading: false,
     payload: null,
   },
+  folderPicker: {
+    open: false,
+    current: "",
+    parent: "",
+    resolver: null,
+  },
 };
 
 const tabsEl = document.getElementById("tabs");
@@ -27,10 +34,18 @@ const topicGridEl = document.getElementById("topic-grid");
 const pageInfoEl = document.getElementById("page-info");
 const jobListEl = document.getElementById("job-list");
 const sidePanelEl = document.querySelector(".side-panel");
+const downloadFabEl = document.getElementById("btn-download-fab");
+const topbarEl = document.querySelector(".topbar");
+const mobileToolsBtnEl = document.getElementById("btn-mobile-tools");
 
 const viewerEl = document.getElementById("viewer");
 const viewerBodyEl = document.getElementById("viewer-body");
 const viewerTitleEl = document.getElementById("viewer-title");
+const folderPickerEl = document.getElementById("folder-picker");
+const folderPickerPathEl = document.getElementById("folder-picker-path");
+const folderPickerListEl = document.getElementById("folder-picker-list");
+const folderPickerUpEl = document.getElementById("folder-picker-up");
+const folderPickerChooseEl = document.getElementById("folder-picker-choose");
 
 async function fetchJSON(url, options = {}) {
   const res = await fetch(url, options);
@@ -42,12 +57,101 @@ async function fetchJSON(url, options = {}) {
 }
 
 async function pickRuleDownloadDir(initialDir = "") {
-  const data = await fetchJSON("/api/system/select-folder", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ initial_dir: initialDir || "" }),
+  if (!folderPickerEl || !folderPickerListEl || !folderPickerPathEl || !folderPickerUpEl || !folderPickerChooseEl) {
+    // Fallback for unexpected template mismatch.
+    const data = await fetchJSON("/api/system/select-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initial_dir: initialDir || "" }),
+    });
+    return (data.path || "").trim();
+  }
+
+  if (state.folderPicker.open && typeof state.folderPicker.resolver === "function") {
+    state.folderPicker.resolver("");
+  }
+
+  return new Promise((resolve) => {
+    state.folderPicker.open = true;
+    state.folderPicker.resolver = resolve;
+    folderPickerEl.classList.remove("hidden");
+
+    const bootPath = (initialDir || "").trim();
+    loadFolderPicker(bootPath)
+      .catch(async (error) => {
+        showToast(error.message);
+        await loadFolderPicker("");
+      })
+      .catch((error) => {
+        showToast(error.message);
+        closeFolderPicker("");
+      });
   });
-  return (data.path || "").trim();
+}
+
+function closeFolderPicker(pickedPath = "") {
+  if (!state.folderPicker.open) {
+    return;
+  }
+  const resolver = state.folderPicker.resolver;
+  state.folderPicker.open = false;
+  state.folderPicker.current = "";
+  state.folderPicker.parent = "";
+  state.folderPicker.resolver = null;
+  if (folderPickerEl) {
+    folderPickerEl.classList.add("hidden");
+  }
+  if (typeof resolver === "function") {
+    resolver((pickedPath || "").trim());
+  }
+}
+
+async function loadFolderPicker(path = "") {
+  const url = path
+    ? `/api/system/directories?path=${encodeURIComponent(path)}`
+    : "/api/system/directories";
+  const data = await fetchJSON(url);
+
+  state.folderPicker.current = (data.current || "").trim();
+  state.folderPicker.parent = (data.parent || "").trim();
+  renderFolderPickerItems(Array.isArray(data.items) ? data.items : []);
+}
+
+function renderFolderPickerItems(items) {
+  if (!folderPickerPathEl || !folderPickerListEl || !folderPickerUpEl || !folderPickerChooseEl) {
+    return;
+  }
+
+  folderPickerPathEl.textContent = state.folderPicker.current || "请选择磁盘";
+  folderPickerUpEl.disabled = !state.folderPicker.parent;
+  folderPickerChooseEl.disabled = !state.folderPicker.current;
+
+  folderPickerListEl.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "folder-picker-empty";
+    empty.textContent = "当前目录没有子文件夹";
+    folderPickerListEl.appendChild(empty);
+    return;
+  }
+
+  items.forEach((item) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "folder-picker-item";
+    btn.innerHTML = `
+      <span class="folder-picker-item-name">${escapeHtml(item.name || item.path || "")}</span>
+      <span class="folder-picker-item-arrow">进入</span>
+    `;
+    btn.addEventListener("click", async () => {
+      try {
+        await loadFolderPicker(item.path || "");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+    folderPickerListEl.appendChild(btn);
+  });
 }
 
 function renderShelfRootsDisplay() {
@@ -61,6 +165,23 @@ function showToast(message) {
   el.textContent = message;
   el.classList.remove("hidden");
   setTimeout(() => el.classList.add("hidden"), 2200);
+}
+
+function updateDownloadFab() {
+  if (!downloadFabEl) {
+    return;
+  }
+  if (!state.activeTab || state.activeTab.kind !== "online") {
+    downloadFabEl.classList.add("is-hidden");
+    return;
+  }
+  const selectedCount = activeSelectionSet().size;
+  if (selectedCount <= 0) {
+    downloadFabEl.classList.add("is-hidden");
+    return;
+  }
+  downloadFabEl.textContent = `下载选中主题 (${selectedCount})`;
+  downloadFabEl.classList.remove("is-hidden");
 }
 
 function activeTabKey(tab) {
@@ -127,6 +248,10 @@ function getOnlineQuery(ruleId) {
   return (state.onlineSearch.get(ruleId) || "").trim();
 }
 
+function getLocalQuery(shelfId) {
+  return (state.localSearch.get(String(shelfId)) || "").trim();
+}
+
 function topicImageCacheKey(ruleId, topicId) {
   return `${ruleId}:${topicId}`;
 }
@@ -178,6 +303,61 @@ async function ensureOnlineTopicCount(ruleId, topic) {
   } finally {
     state.topicCountLoading.delete(key);
   }
+}
+
+async function downloadSelectedTopics() {
+  if (!state.activeTab || state.activeTab.kind !== "online") {
+    updateDownloadFab();
+    return;
+  }
+
+  const selected = Array.from(activeSelectionSet());
+  if (selected.length === 0) {
+    showToast("未选择主题");
+    updateDownloadFab();
+    return;
+  }
+
+  let okCount = 0;
+  let skippedCount = 0;
+  for (const topicId of selected) {
+    const topic = state.topics.find((item) => item.topic_id === topicId);
+    if (!topic) continue;
+
+    try {
+      const payload = {
+        rule: state.activeTab.id,
+        topic_id: topic.topic_id,
+        title: topic.title,
+        detail_url: topic.detail_url,
+      };
+
+      const cached = getTopicImageCache(state.activeTab.id, topic.topic_id);
+      if (cached && cached.complete && Array.isArray(cached.urls) && cached.urls.length > 0) {
+        payload.image_urls = cached.urls.slice();
+      }
+
+      const result = await fetchJSON("/api/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (result?.skipped) {
+        skippedCount += 1;
+      } else {
+        okCount += 1;
+      }
+    } catch (_) {
+      showToast(`下载失败: ${topic.title}`);
+    }
+  }
+
+  const suffix = skippedCount > 0 ? `，跳过 ${skippedCount} 个（目录已存在）` : "";
+  showToast(`已加入下载队列 ${okCount} 个${suffix}`);
+  activeSelectionSet().clear();
+  renderTopics();
+  updateDownloadFab();
+  await pollJobs();
 }
 
 function decodeProxyImageUrl(viewerUrl) {
@@ -307,9 +487,15 @@ async function reloadAllMeta() {
   state.shelves = shelfRes.items || [];
 
   const validRuleIds = new Set(state.rules.map((r) => r.rule_id));
+  const validShelfIds = new Set(state.shelves.map((s) => String(s.shelf_id)));
   Array.from(state.onlineSearch.keys()).forEach((ruleId) => {
     if (!validRuleIds.has(ruleId)) {
       state.onlineSearch.delete(ruleId);
+    }
+  });
+  Array.from(state.localSearch.keys()).forEach((shelfId) => {
+    if (!validShelfIds.has(String(shelfId))) {
+      state.localSearch.delete(String(shelfId));
     }
   });
   Array.from(state.onlineCategory.keys()).forEach((ruleId) => {
@@ -329,6 +515,12 @@ async function reloadAllMeta() {
     const selected = getOnlineCategory(rule.rule_id);
     state.onlineCategory.set(rule.rule_id, selected);
   });
+  state.shelves.forEach((shelf) => {
+    const key = String(shelf.shelf_id);
+    if (!state.localSearch.has(key)) {
+      state.localSearch.set(key, "");
+    }
+  });
 
   ensureActiveTab();
   renderTabs();
@@ -336,6 +528,54 @@ async function reloadAllMeta() {
 }
 
 function bindBaseEvents() {
+  if (mobileToolsBtnEl && topbarEl) {
+    mobileToolsBtnEl.addEventListener("click", () => {
+      topbarEl.classList.toggle("mobile-tools-open");
+      const expanded = topbarEl.classList.contains("mobile-tools-open");
+      mobileToolsBtnEl.setAttribute("aria-expanded", expanded ? "true" : "false");
+    });
+  }
+
+  const folderPickerCloseIds = ["folder-picker-close", "folder-picker-cancel", "folder-picker-mask"];
+  folderPickerCloseIds.forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("click", () => closeFolderPicker(""));
+  });
+
+  if (folderPickerUpEl) {
+    folderPickerUpEl.addEventListener("click", async () => {
+      if (!state.folderPicker.parent) return;
+      try {
+        await loadFolderPicker(state.folderPicker.parent);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  }
+
+  const folderRefreshEl = document.getElementById("folder-picker-refresh");
+  if (folderRefreshEl) {
+    folderRefreshEl.addEventListener("click", async () => {
+      const path = state.folderPicker.current || "";
+      try {
+        await loadFolderPicker(path);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  }
+
+  if (folderPickerChooseEl) {
+    folderPickerChooseEl.addEventListener("click", () => {
+      if (!state.folderPicker.current) {
+        showToast("请先进入要选择的目录");
+        return;
+      }
+      closeFolderPicker(state.folderPicker.current);
+    });
+  }
+
   document.getElementById("btn-pick-shelf-root").addEventListener("click", async () => {
     try {
       const initialDir = state.newShelfRoots.length ? state.newShelfRoots[state.newShelfRoots.length - 1] : "";
@@ -396,6 +636,11 @@ function bindBaseEvents() {
 
   document.getElementById("viewer-close").addEventListener("click", closeViewer);
   document.getElementById("viewer-close-mask").addEventListener("click", closeViewer);
+  if (downloadFabEl) {
+    downloadFabEl.addEventListener("click", async () => {
+      await downloadSelectedTopics();
+    });
+  }
 
   viewerBodyEl.addEventListener("scroll", async () => {
     if (!state.viewer.open || state.viewer.loading || !state.viewer.hasMore) return;
@@ -405,6 +650,7 @@ function bindBaseEvents() {
   });
 
   renderShelfRootsDisplay();
+  updateDownloadFab();
 }
 
 function renderTabs() {
@@ -489,6 +735,7 @@ function renderActions() {
   if (!state.activeTab) {
     actionsEl.innerHTML = managerHtml;
     bindRuleToggleEvents();
+    updateDownloadFab();
     return;
   }
 
@@ -523,7 +770,6 @@ function renderActions() {
         <input id="rule-dir" type="text" value="${escapeHtml(dir)}" readonly />
         <button id="btn-pick-dir">选择目录</button>
       </div>
-      <button id="btn-download-selected">下载选中主题</button>
     `;
 
     bindRuleToggleEvents();
@@ -583,62 +829,19 @@ function renderActions() {
       }
     });
 
-    document.getElementById("btn-download-selected").addEventListener("click", async () => {
-      const selected = Array.from(activeSelectionSet());
-      if (selected.length === 0) {
-        showToast("未选择主题");
-        return;
-      }
-
-      let okCount = 0;
-      let skippedCount = 0;
-      for (const topicId of selected) {
-        const topic = state.topics.find((item) => item.topic_id === topicId);
-        if (!topic) continue;
-
-        try {
-          const payload = {
-            rule: state.activeTab.id,
-            topic_id: topic.topic_id,
-            title: topic.title,
-            detail_url: topic.detail_url,
-          };
-
-          const cached = getTopicImageCache(state.activeTab.id, topic.topic_id);
-          if (cached && cached.complete && Array.isArray(cached.urls) && cached.urls.length > 0) {
-            payload.image_urls = cached.urls.slice();
-          }
-
-          const result = await fetchJSON("/api/download", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-          if (result?.skipped) {
-            skippedCount += 1;
-          } else {
-            okCount += 1;
-          }
-        } catch (_) {
-          showToast(`下载失败: ${topic.title}`);
-        }
-      }
-
-      const suffix = skippedCount > 0 ? `，跳过 ${skippedCount} 个（目录已存在）` : "";
-      showToast(`已加入下载队列 ${okCount} 个${suffix}`);
-      activeSelectionSet().clear();
-      renderTopics();
-      await pollJobs();
-    });
-
+    updateDownloadFab();
     return;
   }
 
   const shelfId = Number(state.activeTab.id);
   const shelf = getShelfById(state.activeTab.id);
   const allowDeleteShelf = shelf && shelf.source_type === "custom";
+  const currentQuery = getLocalQuery(state.activeTab.id);
   actionsEl.innerHTML = `
     ${managerHtml}
+    <div class="online-search-bar"><span>书架搜索</span><input id="local-search-input" type="text" value="${escapeHtml(
+      currentQuery
+    )}" placeholder="按主题名搜索" /><button id="btn-local-search">搜索</button><button id="btn-local-clear">清空</button></div>
     <span>本地书架扫描深度：最多 2 层目录</span>
     <button id="btn-refresh-shelf">刷新当前书架</button>
     ${
@@ -649,6 +852,26 @@ function renderActions() {
   `;
 
   bindRuleToggleEvents();
+  updateDownloadFab();
+
+  const localInput = document.getElementById("local-search-input");
+  const doLocalSearch = async () => {
+    state.localSearch.set(state.activeTab.id, localInput.value.trim());
+    state.page = 1;
+    await loadTopics();
+  };
+  document.getElementById("btn-local-search").addEventListener("click", doLocalSearch);
+  localInput.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    await doLocalSearch();
+  });
+  document.getElementById("btn-local-clear").addEventListener("click", async () => {
+    localInput.value = "";
+    state.localSearch.set(state.activeTab.id, "");
+    state.page = 1;
+    await loadTopics();
+  });
 
   document.getElementById("btn-refresh-shelf").addEventListener("click", async () => {
     try {
@@ -689,6 +912,7 @@ async function loadTopics() {
   if (!state.activeTab) {
     pageInfoEl.textContent = "";
     topicGridEl.innerHTML = '<div class="empty">当前没有启用在线规则，也没有本地书架</div>';
+    updateDownloadFab();
     return;
   }
 
@@ -715,7 +939,13 @@ async function loadTopics() {
       state.topics = data.items || [];
     } else {
       const shelfId = Number(state.activeTab.id);
-      const data = await fetchJSON(`/api/shelves/${shelfId}/topics?page=${state.page}&page_size=20`);
+      const query = getLocalQuery(state.activeTab.id);
+      let url = `/api/shelves/${shelfId}/topics?page=${state.page}&page_size=20`;
+      if (query) {
+        url += `&q=${encodeURIComponent(query)}`;
+        pageInfo += ` · 搜索: ${query}`;
+      }
+      const data = await fetchJSON(url);
       state.topics = data.items || [];
     }
   } catch (error) {
@@ -725,12 +955,14 @@ async function loadTopics() {
 
   pageInfoEl.textContent = pageInfo;
   renderTopics();
+  updateDownloadFab();
 }
 
 function renderTopics() {
   topicGridEl.innerHTML = "";
   if (state.topics.length === 0) {
     topicGridEl.innerHTML = '<div class="empty">当前页没有主题</div>';
+    updateDownloadFab();
     return;
   }
 
@@ -793,6 +1025,7 @@ function renderTopics() {
         } else {
           selectedSet.delete(topic.topic_id);
         }
+        updateDownloadFab();
       });
       ensureOnlineTopicCount(state.activeTab.id, topic).catch(() => {
         // no-op
@@ -801,6 +1034,7 @@ function renderTopics() {
 
     topicGridEl.appendChild(card);
   });
+  updateDownloadFab();
 }
 
 async function openViewer(topic) {

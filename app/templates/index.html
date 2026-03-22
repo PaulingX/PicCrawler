@@ -19,6 +19,9 @@
         <p class="kicker">PicCrawler</p>
         <h1>图片在线浏览下载系统</h1>
       </div>
+      <button id="btn-mobile-tools" class="mobile-tools-toggle" type="button" aria-expanded="false">
+        工具
+      </button>
       <div class="shelf-form">
         <input id="shelf-name" type="text" placeholder="新增本地书架名称" />
         <div class="shelf-roots-row">
@@ -62,6 +65,27 @@
       </div>
     </section>
 
+    <section id="folder-picker" class="folder-picker hidden">
+      <div class="folder-picker-mask" id="folder-picker-mask"></div>
+      <div class="folder-picker-card">
+        <div class="folder-picker-head">
+          <h3>选择目录</h3>
+          <button id="folder-picker-close" type="button">关闭</button>
+        </div>
+        <div class="folder-picker-path" id="folder-picker-path">请选择磁盘</div>
+        <div class="folder-picker-toolbar">
+          <button id="folder-picker-up" type="button">上一级</button>
+          <button id="folder-picker-refresh" type="button">刷新</button>
+          <button id="folder-picker-choose" type="button">选择当前目录</button>
+        </div>
+        <div class="folder-picker-list" id="folder-picker-list"></div>
+        <div class="folder-picker-foot">
+          <button id="folder-picker-cancel" type="button">取消</button>
+        </div>
+      </div>
+    </section>
+
+    <button id="btn-download-fab" class="download-fab is-hidden" type="button">下载选中</button>
     <div id="toast" class="toast hidden"></div>
 
     <script src="/static/app.js"></script>

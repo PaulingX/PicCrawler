@@ -173,6 +173,76 @@ def delete_custom_shelf(shelf_id: int) -> dict:
     }
 
 
+def upsert_downloaded_topic(rule_id: str, root_dir: str, topic_dir: str, title_hint: str = "") -> dict:
+    root_path = Path(root_dir).resolve()
+    folder = Path(topic_dir).resolve()
+    if not folder.exists() or not folder.is_dir():
+        raise ValueError("topic folder not found")
+
+    images = list_direct_images(folder)
+    if not images:
+        raise ValueError("topic folder has no images")
+
+    if not root_path.exists() or not root_path.is_dir():
+        root_path = folder.parent
+
+    try:
+        rel_path = str(folder.relative_to(root_path))
+    except ValueError:
+        root_path = folder.parent
+        rel_path = folder.name
+
+    rule_row = query_one("SELECT name FROM rules WHERE rule_id = ?", (rule_id,))
+    rule_name = str(rule_row["name"]) if rule_row and rule_row["name"] else rule_id
+    shelf_name = f"{rule_name} 下载目录"
+    shelf_id = ensure_rule_shelf(rule_id, shelf_name, [str(root_path)])
+
+    topic_key = f"{root_path}::{rel_path}"
+    title = str(title_hint).strip() or folder.name
+    cover_path = str(images[0].resolve())
+    now = _utcnow()
+
+    row = query_one(
+        "SELECT topic_id FROM library_topics WHERE shelf_id = ? AND topic_key = ?",
+        (shelf_id, topic_key),
+    )
+
+    if row:
+        topic_id = int(row["topic_id"])
+        execute(
+            """
+            UPDATE library_topics
+            SET title = ?, abs_path = ?, rel_path = ?, cover_path = ?, total_images = ?, updated_at = ?
+            WHERE topic_id = ?
+            """,
+            (title, str(folder), rel_path, cover_path, len(images), now, topic_id),
+        )
+        execute("DELETE FROM library_images WHERE topic_id = ?", (topic_id,))
+    else:
+        cur = execute(
+            """
+            INSERT INTO library_topics(
+                shelf_id, topic_key, title, abs_path, rel_path,
+                cover_path, total_images, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (shelf_id, topic_key, title, str(folder), rel_path, cover_path, len(images), now),
+        )
+        topic_id = int(cur.lastrowid)
+
+    for index, image in enumerate(images, start=1):
+        execute(
+            """
+            INSERT INTO library_images(topic_id, image_path, image_index)
+            VALUES(?, ?, ?)
+            """,
+            (topic_id, str(image.resolve()), index),
+        )
+
+    execute("UPDATE shelves SET updated_at = ? WHERE shelf_id = ?", (now, shelf_id))
+    return {"shelf_id": shelf_id, "topic_id": topic_id, "total_images": len(images)}
+
+
 def _walk_folders(root: Path, max_depth: int) -> list[Path]:
     results: list[Path] = []
     queue: deque[tuple[Path, int]] = deque([(root, 0)])

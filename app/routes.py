@@ -3,6 +3,10 @@ from __future__ import annotations
 import ipaddress
 import re
 import sqlite3
+import subprocess
+import sys
+import shutil
+import ctypes
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, urlunparse
@@ -86,23 +90,136 @@ def api_system_select_folder():
         initial_dir = str(initial.resolve()) if initial.exists() else ""
 
     try:
-        import tkinter as tk
-        from tkinter import filedialog
+        if sys.platform.startswith("win"):
+            selected = _select_folder_windows(initial_dir)
+        else:
+            import tkinter as tk
+            from tkinter import filedialog
 
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        selected = filedialog.askdirectory(
-            initialdir=initial_dir or None,
-            title="选择目录",
-            mustexist=False,
-        )
-        root.destroy()
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            selected = filedialog.askdirectory(
+                initialdir=initial_dir or None,
+                title="选择目录",
+                mustexist=False,
+            )
+            root.destroy()
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"系统目录选择失败: {exc}"}), 500
 
     chosen = str(Path(selected).resolve()) if selected else ""
     return jsonify({"ok": True, "path": chosen})
+
+
+@bp.get("/api/system/directories")
+def api_system_directories():
+    raw_path = str(request.args.get("path", "")).strip()
+    current = _normalize_existing_dir(raw_path)
+
+    if current is None:
+        roots = _list_directory_roots()
+        return jsonify(
+            {
+                "ok": True,
+                "is_root": True,
+                "current": "",
+                "parent": "",
+                "items": [{"name": str(root), "path": str(root)} for root in roots],
+            }
+        )
+
+    parent = current.parent
+    parent_path = "" if parent == current else str(parent)
+
+    children: list[dict[str, str]] = []
+    try:
+        dirs = [p for p in current.iterdir() if p.is_dir()]
+    except (PermissionError, OSError):
+        dirs = []
+
+    dirs.sort(key=lambda p: p.name.lower())
+    for child in dirs:
+        children.append({"name": child.name, "path": str(child)})
+
+    return jsonify(
+        {
+            "ok": True,
+            "is_root": False,
+            "current": str(current),
+            "parent": parent_path,
+            "items": children,
+        }
+    )
+
+
+def _select_folder_windows(initial_dir: str) -> str:
+    ps_exe = shutil.which("powershell") or shutil.which("pwsh")
+    if not ps_exe:
+        raise RuntimeError("未找到 PowerShell，无法打开系统目录选择器")
+
+    escaped = initial_dir.replace("'", "''")
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms | Out-Null; "
+        "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; "
+        "$dlg.Description = '选择目录'; "
+        "$dlg.ShowNewFolderButton = $true; "
+        f"if ('{escaped}' -and (Test-Path -LiteralPath '{escaped}')) {{ $dlg.SelectedPath = '{escaped}' }}; "
+        "$result = $dlg.ShowDialog(); "
+        "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { "
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Write-Output $dlg.SelectedPath }"
+    )
+
+    proc = subprocess.run(  # noqa: S603
+        [ps_exe, "-NoProfile", "-NonInteractive", "-STA", "-Command", script],  # noqa: S607
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(detail or f"PowerShell 退出码 {proc.returncode}")
+
+    return (proc.stdout or "").strip()
+
+
+def _normalize_existing_dir(raw_path: str) -> Path | None:
+    if not raw_path:
+        return None
+
+    raw = raw_path.strip()
+    if not raw:
+        return None
+
+    if sys.platform.startswith("win") and re.fullmatch(r"[a-zA-Z]:", raw):
+        raw = raw + "\\"
+
+    path = Path(raw).expanduser()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+
+    if not resolved.exists() or not resolved.is_dir():
+        return None
+    return resolved
+
+
+def _list_directory_roots() -> list[Path]:
+    if sys.platform.startswith("win"):
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        roots: list[Path] = []
+        for idx in range(26):
+            if not (bitmask & (1 << idx)):
+                continue
+            letter = chr(ord("A") + idx)
+            root = Path(f"{letter}:\\")
+            if root.exists():
+                roots.append(root)
+        roots.sort(key=lambda p: str(p).lower())
+        return roots
+    return [Path("/")]
 
 @bp.post("/api/rules/<rule_id>/enabled")
 def api_set_rule_enabled(rule_id: str):
@@ -468,23 +585,47 @@ def api_shelf_topics(shelf_id: int):
     page = max(1, int(request.args.get("page", "1")))
     page_size = max(1, min(100, int(request.args.get("page_size", "20"))))
     offset = (page - 1) * page_size
+    query = str(request.args.get("q", "")).strip()
+    like_query = f"%{query}%"
 
-    total_row = query_one(
-        "SELECT COUNT(1) AS cnt FROM library_topics WHERE shelf_id = ?",
-        (shelf_id,),
-    )
+    if query:
+        total_row = query_one(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM library_topics
+            WHERE shelf_id = ? AND title LIKE ? COLLATE NOCASE
+            """,
+            (shelf_id, like_query),
+        )
+    else:
+        total_row = query_one(
+            "SELECT COUNT(1) AS cnt FROM library_topics WHERE shelf_id = ?",
+            (shelf_id,),
+        )
     total = int(total_row["cnt"]) if total_row else 0
 
-    rows = query_all(
-        """
-        SELECT topic_id, title, rel_path, cover_path, total_images, updated_at
-        FROM library_topics
-        WHERE shelf_id = ?
-        ORDER BY rel_path COLLATE NOCASE
-        LIMIT ? OFFSET ?
-        """,
-        (shelf_id, page_size, offset),
-    )
+    if query:
+        rows = query_all(
+            """
+            SELECT topic_id, title, rel_path, cover_path, total_images, updated_at
+            FROM library_topics
+            WHERE shelf_id = ? AND title LIKE ? COLLATE NOCASE
+            ORDER BY updated_at DESC, topic_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (shelf_id, like_query, page_size, offset),
+        )
+    else:
+        rows = query_all(
+            """
+            SELECT topic_id, title, rel_path, cover_path, total_images, updated_at
+            FROM library_topics
+            WHERE shelf_id = ?
+            ORDER BY updated_at DESC, topic_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (shelf_id, page_size, offset),
+        )
 
     items = []
     for row in rows:
@@ -499,6 +640,7 @@ def api_shelf_topics(shelf_id: int):
             "items": items,
             "page": page,
             "page_size": page_size,
+            "q": query,
             "total": total,
             "has_more": offset + page_size < total,
         }
