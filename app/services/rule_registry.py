@@ -5,12 +5,14 @@ from app.services.crawler_4khd import Crawler4KHD
 from app.services.crawler_asmhentai import CrawlerAsmhentai
 from app.services.crawler_hitomi import CrawlerHitomi
 from app.services.crawler_wnacg import CrawlerWnacg
+from app.services.crawler_youwu import CrawlerYouwu
 
 _CRAWLER_MAP = {
     "crawler_4khd": Crawler4KHD,
     "crawler_asmhentai": CrawlerAsmhentai,
     "crawler_wnacg": CrawlerWnacg,
     "crawler_hitomi": CrawlerHitomi,
+    "crawler_youwu": CrawlerYouwu,
 }
 
 _CRAWLER_CAPABILITIES = {
@@ -18,6 +20,7 @@ _CRAWLER_CAPABILITIES = {
     "crawler_asmhentai": {"supports_search": 1, "categories": []},
     "crawler_wnacg": {"supports_search": 1, "categories": [1, 9, 10]},
     "crawler_hitomi": {"supports_search": 1, "categories": []},
+    "crawler_youwu": {"supports_search": 1, "categories": []},
 }
 
 

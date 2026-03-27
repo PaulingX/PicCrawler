@@ -25,6 +25,7 @@
 ### 3、内置规则
 - `https://www.4khd.com/`
 - `https://asmhentai.com/language/chinese/`
+- `https://youwu.im/`（支持 `?page=` 翻页，支持关键词搜索）
 - `https://www.wnacg.com/`（分类聚合：`cate-1/9/10`，支持搜索）
 - `https://漫香阁.com/`（自动尝试可用镜像域名，分类聚合，支持搜索）
 - `https://hitomi.la/index-chinese.html`（支持标签查询与关键词搜索）
@@ -92,6 +93,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1 -Python "C:\Pyt
 - `app/database.py`: SQLite 初始化与访问
 - `app/services/crawler_4khd.py`: 4khd 抓取规则
 - `app/services/crawler_asmhentai.py`: ASMHentai 中文规则
+- `app/services/crawler_youwu.py`: 尤物丧志规则（分页 + 搜索）
 - `app/services/crawler_wnacg.py`: WNACG 规则（分类 + 搜索）
 - `app/services/crawler_manxiangge.py`: 漫香阁规则（自动域名 + 分类 + 搜索）
 - `app/services/crawler_hitomi.py`: Hitomi 中文规则（标签 + 搜索）

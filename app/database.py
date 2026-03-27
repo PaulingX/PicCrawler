@@ -108,6 +108,13 @@ DEFAULT_RULES = [
         "enabled": 1,
     },
     {
+        "rule_id": "youwu",
+        "name": "尤物丧志",
+        "base_url": "https://youwu.im/",
+        "crawler": "crawler_youwu",
+        "enabled": 1,
+    },
+    {
         "rule_id": "wnacg",
         "name": "WNACG",
         "base_url": "https://www.wnacg.com/",

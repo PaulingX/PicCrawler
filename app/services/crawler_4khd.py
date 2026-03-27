@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -14,6 +14,12 @@ from app.services.crawler_base import BaseCrawler
 
 class Crawler4KHD(BaseCrawler):
     base_url = "https://www.4khd.com/"
+    bootstrap_urls = (
+        "https://www.4khd.com/",
+        "https://dli.ssuu.uk/",
+        "https://hett.uuss.uk/",
+        "https://cqnim.ssuu.uk/",
+    )
 
     def __init__(self) -> None:
         self.session = requests.Session()
@@ -21,6 +27,9 @@ class Crawler4KHD(BaseCrawler):
         proxy = str(os.getenv("PICCRAWLER_PROXY", "")).strip()
         if proxy:
             self.session.proxies.update({"http": proxy, "https": proxy})
+
+        self._resolved_base_url: str | None = None
+        self._known_hosts: set[str] = {"4khd.com", "www.4khd.com"}
 
     def list_topics(self, page_no: int, query: str = "") -> list[dict]:
         page_no = max(1, int(page_no))
@@ -40,18 +49,30 @@ class Crawler4KHD(BaseCrawler):
         return []
 
     def _build_list_urls(self, page_no: int, keyword: str) -> list[str]:
+        base = self._get_base_url()
+
         if keyword:
             encoded = quote(keyword, safe="")
             if page_no <= 1:
-                return [urljoin(self.base_url, f"search/{encoded}")]
+                return [
+                    urljoin(base, f"?s={encoded}"),
+                    urljoin(base, f"search/{encoded}"),
+                ]
             return [
-                urljoin(self.base_url, f"search/{encoded}/page/{page_no}/"),
-                urljoin(self.base_url, f"search/{encoded}"),
+                urljoin(base, f"search/{encoded}/page/{page_no}/"),
+                urljoin(base, f"search/{encoded}/?paged={page_no}"),
+                urljoin(base, f"?s={encoded}&paged={page_no}"),
+                urljoin(base, f"page/{page_no}/?s={encoded}"),
+                urljoin(base, f"search/{encoded}"),
             ]
 
         if page_no <= 1:
-            return [self.base_url]
-        return [urljoin(self.base_url, f"page/{page_no}/")]
+            return [base]
+        return [
+            urljoin(base, f"page/{page_no}/"),
+            urljoin(base, f"page/{page_no}"),
+            urljoin(base, f"?paged={page_no}"),
+        ]
 
     def _parse_topics_from_html(self, html: str) -> list[dict]:
         soup = BeautifulSoup(html, "html.parser")
@@ -97,17 +118,19 @@ class Crawler4KHD(BaseCrawler):
 
     def topic_images(self, detail_url: str) -> list[str]:
         detail_url = urljoin(self.base_url, detail_url)
-        res = self.session.get(detail_url, timeout=20)
+        fetch_url = self._to_fetch_url(detail_url)
+
+        res = self.session.get(fetch_url, timeout=20)
         res.raise_for_status()
         first_html = res.text or ""
         first_soup = BeautifulSoup(first_html, "html.parser")
 
-        page_urls = self._collect_topic_page_urls(detail_url=detail_url, first_soup=first_soup)
+        page_urls = self._collect_topic_page_urls(detail_url=fetch_url, first_soup=first_soup)
         image_urls: list[str] = []
         seen: set[str] = set()
 
         for page_url in page_urls:
-            if page_url == detail_url:
+            if page_url == fetch_url:
                 soup = first_soup
             else:
                 try:
@@ -127,8 +150,9 @@ class Crawler4KHD(BaseCrawler):
 
     def topic_image_count(self, detail_url: str) -> int:
         detail_url = urljoin(self.base_url, detail_url)
+        fetch_url = self._to_fetch_url(detail_url)
         try:
-            res = self.session.get(detail_url, timeout=20)
+            res = self.session.get(fetch_url, timeout=20)
             res.raise_for_status()
         except Exception:  # noqa: BLE001
             return 0
@@ -171,13 +195,21 @@ class Crawler4KHD(BaseCrawler):
             if not href:
                 continue
 
-            full = urljoin(detail_url, href).split("#", 1)[0]
+            full = self._to_fetch_url(urljoin(detail_url, href).split("#", 1)[0])
             parsed_full = urlparse(full)
             if parsed_full.netloc != parsed.netloc:
                 continue
 
             path = parsed_full.path.rstrip("/")
             if not path.startswith(base_path_slash):
+                if path != base_path:
+                    continue
+                match = re.search(r"(?:^|&)(?:page|paged)=(\d+)(?:&|$)", parsed_full.query)
+                if not match:
+                    continue
+                page_no = int(match.group(1))
+                if page_no > 1:
+                    page_numbers.add(page_no)
                 continue
 
             suffix = path[len(base_path_slash) :]
@@ -276,7 +308,8 @@ class Crawler4KHD(BaseCrawler):
 
     def _is_valid_topic_url(self, url: str) -> bool:
         parsed = urlparse(url)
-        if not parsed.netloc.endswith("4khd.com"):
+        host = (parsed.hostname or "").lower()
+        if not self._is_topic_host(host):
             return False
 
         path = parsed.path.rstrip("/")
@@ -288,5 +321,140 @@ class Crawler4KHD(BaseCrawler):
             return False
 
         return path.startswith("/content/")
+
+    def _get_base_url(self) -> str:
+        if self._resolved_base_url:
+            return self._resolved_base_url
+
+        candidates: list[str] = []
+        seen_candidates: set[str] = set()
+
+        def push(candidate_url: str) -> None:
+            normalized = self._normalize_base_url(candidate_url)
+            if not normalized:
+                return
+            if normalized in seen_candidates:
+                return
+            seen_candidates.add(normalized)
+            candidates.append(normalized)
+
+        push(self.base_url)
+        for raw in self.bootstrap_urls:
+            push(raw)
+
+        idx = 0
+        while idx < len(candidates):
+            candidate = candidates[idx]
+            idx += 1
+            try:
+                res = self.session.get(candidate, timeout=8, allow_redirects=True)
+            except Exception:  # noqa: BLE001
+                continue
+
+            final_base = self._normalize_base_url(res.url or candidate)
+            push(final_base)
+            self._remember_host(final_base)
+
+            html = res.text or ""
+            for discovered in self._extract_candidate_base_urls(html):
+                push(discovered)
+                self._remember_host(discovered)
+
+            if self._looks_like_topic_listing(html):
+                self._resolved_base_url = final_base or candidate
+                return self._resolved_base_url
+
+        self._resolved_base_url = candidates[0] if candidates else self.base_url
+        return self._resolved_base_url
+
+    def _normalize_base_url(self, url: str) -> str:
+        parsed = urlparse(str(url or "").strip())
+        if parsed.scheme not in {"http", "https"}:
+            return ""
+        if not parsed.netloc:
+            return ""
+        return f"{parsed.scheme}://{parsed.netloc}/"
+
+    def _extract_candidate_base_urls(self, html: str) -> list[str]:
+        if not html:
+            return []
+
+        discovered: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"https?://[A-Za-z0-9.-]+(?:/[^\s\"'<>)]*)?", html):
+            raw = match.group(0).strip().rstrip(";,")
+            parsed = urlparse(raw)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            host = (parsed.hostname or "").lower()
+            if not self._is_topic_host(host):
+                continue
+
+            base = self._normalize_base_url(raw)
+            if not base or base in seen:
+                continue
+            seen.add(base)
+            discovered.append(base)
+
+        return discovered
+
+    def _looks_like_topic_listing(self, html: str) -> bool:
+        if not html:
+            return False
+        lower = html.lower()
+        if "/content/" not in lower:
+            return False
+        return any(
+            key in lower
+            for key in [
+                "4khd",
+                "wp-block-post-template",
+                "wp-post-image",
+                "entry-content",
+            ]
+        )
+
+    def _remember_host(self, base_url: str) -> None:
+        host = (urlparse(base_url).hostname or "").lower()
+        if host:
+            self._known_hosts.add(host)
+
+    def _is_topic_host(self, host: str) -> bool:
+        host = str(host or "").lower().strip(".")
+        if not host:
+            return False
+        if host in self._known_hosts:
+            return True
+        if host.endswith(".4khd.com"):
+            return True
+        if host.endswith(".ssuu.uk") or host.endswith(".uuss.uk"):
+            return True
+        return False
+
+    def _to_fetch_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return url
+        if not parsed.netloc:
+            return url
+
+        host = (parsed.hostname or "").lower()
+        if not self._is_topic_host(host):
+            return url
+
+        active = urlparse(self._get_base_url())
+        if not active.netloc:
+            return url
+
+        return urlunparse(
+            (
+                active.scheme or "https",
+                active.netloc,
+                parsed.path or "/",
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
 
 
