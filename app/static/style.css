@@ -625,6 +625,9 @@ button:hover {
 
 .viewer-item {
   position: relative;
+  width: fit-content;
+  max-width: min(100%, 1280px);
+  margin: 0 auto;
 }
 
 .viewer-index {
@@ -649,7 +652,8 @@ button:hover {
 
 .viewer-img {
   display: block;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   height: auto;
   border: 0;
   border-radius: 0;
@@ -937,6 +941,16 @@ button:hover {
   .viewer-body {
     padding: 0 0 calc(14px + env(safe-area-inset-bottom));
     gap: 6px;
+  }
+
+  .viewer-item {
+    width: 100%;
+    margin: 0;
+  }
+
+  .viewer-img {
+    width: 100%;
+    max-width: none;
   }
 
   .folder-picker {

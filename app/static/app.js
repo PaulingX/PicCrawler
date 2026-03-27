@@ -399,11 +399,22 @@ function normalizeProxyRawImageUrl(rawUrl) {
         const originHost = path.slice(0, slash).trim().toLowerCase();
         const originPath = path.slice(slash);
         if (originHost.includes(".")) {
+          // Mirror upstream 4KHD service-worker rewrite.
+          if (originHost === "4khd.com" || originHost.endsWith(".4khd.com")) {
+            const out = new URL(`https://img.uuss.uk${originPath}`);
+            out.search = parsed.search || "";
+            return out.toString();
+          }
           const out = new URL(`https://${originHost}${originPath}`);
           out.search = parsed.search || "";
           return out.toString();
         }
       }
+    }
+    if (host === "pic.4khd.com" || host === "img.4khd.com") {
+      const out = new URL(`https://img.uuss.uk${parsed.pathname || "/"}`);
+      out.search = parsed.search || "";
+      return out.toString();
     }
     return parsed.toString();
   } catch (_) {
@@ -1096,6 +1107,15 @@ function renderTopics() {
     const coverEl = card.querySelector(".card-cover");
     if (coverEl) {
       coverEl.onerror = () => {
+        const isProxy = coverEl.src.includes("/api/online/image-proxy");
+        if (!isProxy && topic.detail_url && coverEl.dataset.directProxyTried !== "1") {
+          coverEl.dataset.directProxyTried = "1";
+          const proxyUrl = buildImageProxyUrl(coverEl.src, topic.detail_url);
+          if (proxyUrl) {
+            coverEl.src = proxyUrl;
+            return;
+          }
+        }
         if (fallbackProxyImage(coverEl)) {
           return;
         }

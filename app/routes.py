@@ -960,8 +960,15 @@ def _normalize_remote_image_url(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
 
-    def _rewrite_pic_to_img(path: str, query: str) -> str:
-        return urlunparse(("https", "img.4khd.com", path, "", query, ""))
+    def _is_4khd_origin_host(origin_host: str) -> bool:
+        origin = str(origin_host or "").strip().lower().strip(".")
+        return bool(origin) and (origin == "4khd.com" or origin.endswith(".4khd.com"))
+
+    def _rewrite_4khd_wp_to_uuss(origin_path: str, query: str) -> str:
+        # 4KHD mirror injects a service worker that rewrites wp.com image URLs
+        # to img.uuss.uk. Mirror this rewrite server-side so crawler/proxy can
+        # fetch stable image URLs without relying on remote JS execution.
+        return urlunparse(("https", "img.uuss.uk", origin_path, "", query, ""))
 
     # WordPress CDN wrapper: i0.wp.com/<origin-host>/<path>?w=1300
     if host.endswith(".wp.com"):
@@ -969,12 +976,15 @@ def _normalize_remote_image_url(url: str) -> str:
         if len(parts) == 2 and "." in parts[0]:
             origin_host = parts[0].strip().lower()
             origin_path = "/" + parts[1]
-            if origin_host == "pic.4khd.com":
-                return _rewrite_pic_to_img(origin_path, parsed.query)
+            # 4KHD wp wrapper currently fails directly (400 in many regions).
+            # Rewrite to img.uuss.uk path as done by upstream service worker.
+            if _is_4khd_origin_host(origin_host):
+                return _rewrite_4khd_wp_to_uuss(origin_path, parsed.query)
             return urlunparse(("https", origin_host, origin_path, "", parsed.query, ""))
 
-    if host == "pic.4khd.com":
-        return _rewrite_pic_to_img(parsed.path, parsed.query)
+    # Normalize legacy 4khd image hosts to current mirror image host.
+    if host == "pic.4khd.com" or host == "img.4khd.com":
+        return _rewrite_4khd_wp_to_uuss(parsed.path, parsed.query)
 
     return url
 
