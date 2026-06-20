@@ -94,7 +94,9 @@ class CrawlerHitomi(BaseCrawler):
         page_offset = (page_no - 1) * self.page_size
 
         if not plan.needs_filter:
-            ids = self._fetch_nozomi_ids(plan.nozomi_key, start=page_offset, count=self.page_size)
+            ids = self._fetch_index_page_ids(page_no)
+            if not ids:
+                ids = self._fetch_nozomi_ids(plan.nozomi_key, start=page_offset, count=self.page_size)
             return self._topics_from_ids(ids, include_meta=False)
 
         wanted = page_offset + self.page_size
@@ -138,6 +140,15 @@ class CrawlerHitomi(BaseCrawler):
                 break
 
         return matched[page_offset : page_offset + self.page_size]
+
+    def _fetch_index_page_ids(self, page_no: int) -> list[int]:
+        page_no = max(1, int(page_no))
+        url = f"{self.base_url}?page={page_no}"
+        html = self._get_text(url, referer=self.base_url)
+        if not html:
+            return []
+        ids = self._extract_gallery_ids_from_html(html)
+        return ids[: self.page_size]
 
     def _normalize_search_query(self, query: str) -> str:
         text = str(query or "").strip()
@@ -691,6 +702,48 @@ class CrawlerHitomi(BaseCrawler):
             return html
         return ""
 
+    def _extract_gallery_ids_from_html(self, html: str) -> list[int]:
+        if not html:
+            return []
+
+        soup = BeautifulSoup(html, "html.parser")
+        ids: list[int] = []
+        seen: set[int] = set()
+
+        def push(value: str) -> None:
+            match = _GALLERY_ID_PATTERN.search(value or "")
+            if not match:
+                return
+            gallery_id = int(match.group(1))
+            if gallery_id > 0 and gallery_id not in seen:
+                seen.add(gallery_id)
+                ids.append(gallery_id)
+
+        for anchor in soup.select("a[href*='/galleries/'], a[href*='/reader/']"):
+            push(str(anchor.get("href") or ""))
+
+        for img in soup.select("img"):
+            for attr in ("data-src", "data-original", "data-lazy-src", "src", "srcset", "data-srcset"):
+                value = str(img.get(attr) or "")
+                if not value:
+                    continue
+                for part in value.split(","):
+                    push(part.split(" ", 1)[0].strip())
+
+        for match in re.finditer(r"/(?:galleries|reader)/(\d+)(?:\.html)?", html, re.IGNORECASE):
+            gallery_id = int(match.group(1))
+            if gallery_id > 0 and gallery_id not in seen:
+                seen.add(gallery_id)
+                ids.append(gallery_id)
+
+        for match in re.finditer(r"galleryid\s*[:=]\s*['\"]?(\d+)", html, re.IGNORECASE):
+            gallery_id = int(match.group(1))
+            if gallery_id > 0 and gallery_id not in seen:
+                seen.add(gallery_id)
+                ids.append(gallery_id)
+
+        return ids
+
     def _parse_galleryblock(self, html: str, gallery_id: int) -> dict | None:
         if not html:
             return None
@@ -1029,18 +1082,20 @@ class CrawlerHitomi(BaseCrawler):
         return images
 
     def _pick_image_variant(self, file_item: dict) -> tuple[str, str]:
-        # Prefer broad-compatible webp when filename already indicates it.
+        # Prefer browser-friendly variants for online preview stability.
         name = str(file_item.get("name") or "").lower().strip()
         ext = name.rsplit(".", 1)[-1] if "." in name else ""
 
-        if ext == "webp":
-            return "webp", "webp"
-        if ext == "avif":
-            return "avif", "avif"
-
+        # Hitomi often provides both AVIF and WEBP. Prefer WEBP first to avoid
+        # client-side decode failures in some environments.
         if bool(file_item.get("haswebp")):
             return "webp", "webp"
+        if ext == "webp":
+            return "webp", "webp"
+
         if bool(file_item.get("hasavif")):
+            return "avif", "avif"
+        if ext == "avif":
             return "avif", "avif"
 
         if ext not in _IMAGE_EXTS:
@@ -1055,8 +1110,8 @@ class CrawlerHitomi(BaseCrawler):
             return ""
 
         x = int(hash_value[-1] + hash_value[-3:-1], 16)
-        # In gg.js, listed "case N:" values map to m=1, default m=0.
-        m = 1 if x in gg.zero_cases else 0
+        # In gg.js, listed "case N:" values map to m=0, default m=1.
+        m = 0 if x in gg.zero_cases else 1
 
         if dir_name == "webp":
             subdomain = f"w{1 + m}"
@@ -1134,22 +1189,3 @@ class CrawlerHitomi(BaseCrawler):
         if "base64," in lower:
             return False
         return lower.startswith("http://") or lower.startswith("https://")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

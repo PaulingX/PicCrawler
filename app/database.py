@@ -115,6 +115,13 @@ DEFAULT_RULES = [
         "enabled": 1,
     },
     {
+        "rule_id": "hotgirl",
+        "name": "HotGirl",
+        "base_url": "https://hotgirl.asia/",
+        "crawler": "crawler_hotgirl",
+        "enabled": 1,
+    },
+    {
         "rule_id": "wnacg",
         "name": "WNACG",
         "base_url": "https://www.wnacg.com/",
@@ -126,6 +133,13 @@ DEFAULT_RULES = [
         "name": "Hitomi 中文",
         "base_url": "https://hitomi.la/index-chinese.html",
         "crawler": "crawler_hitomi",
+        "enabled": 1,
+    },
+    {
+        "rule_id": "xchina",
+        "name": "小黄书 xChina",
+        "base_url": "https://xchina.co/",
+        "crawler": "crawler_xchina",
         "enabled": 1,
     },
 ]

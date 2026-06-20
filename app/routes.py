@@ -14,7 +14,7 @@ from urllib.parse import quote, urlparse, urlunparse
 import requests
 from requests import Response as RequestsResponse
 from requests.exceptions import RequestException
-from flask import Blueprint, abort, current_app, jsonify, render_template, request, send_file, Response
+from flask import Blueprint, abort, current_app, jsonify, redirect, render_template, request, send_file, Response
 
 from app.config import USER_AGENT
 from app.database import execute, query_all, query_one, setting_get, setting_set
@@ -401,6 +401,10 @@ def api_online_topic_count():
         count_fetcher = getattr(crawler, "topic_image_count", None)
         if callable(count_fetcher):
             count = max(0, int(count_fetcher(detail_url)))
+            if rule_id == "hotgirl" and count <= 0:
+                images = _get_or_fetch_images(rule_id, topic_id, detail_url)
+                if images:
+                    return jsonify({"count": len(images), "cached": False})
             return jsonify({"count": count, "cached": False})
 
         paged_fetcher = getattr(crawler, "topic_images_page", None)
@@ -415,12 +419,24 @@ def api_online_topic_count():
                 if total >= 0:
                     return jsonify({"count": total, "cached": False})
 
+        if rule_id == "hotgirl" and cached_count > 0:
+            images = _get_or_fetch_images(rule_id, topic_id, detail_url)
+            if images:
+                return jsonify({"count": len(images), "cached": False})
+
         if cached_count > 0:
             return jsonify({"count": cached_count, "cached": True})
 
         images = _get_or_fetch_images(rule_id, topic_id, detail_url)
         return jsonify({"count": len(images), "cached": False})
     except Exception as exc:  # noqa: BLE001
+        if rule_id == "hotgirl" and cached_count > 0:
+            try:
+                images = _get_or_fetch_images(rule_id, topic_id, detail_url)
+                if images:
+                    return jsonify({"count": len(images), "cached": False})
+            except Exception:  # noqa: BLE001
+                pass
         if cached_count > 0:
             return jsonify({"count": cached_count, "cached": True})
         return jsonify({"error": f"主题数量获取失败: {exc}"}), 502
@@ -438,6 +454,13 @@ def api_online_image_proxy():
 
     resp, warn = _fetch_image_with_fallbacks(image_url=image_url, referer=referer)
     if resp is None:
+        direct_url = _pick_direct_redirect_url(image_url)
+        if direct_url:
+            out = redirect(direct_url, code=302)
+            if warn:
+                out.headers["X-PicCrawler-Proxy-Warn"] = warn[:200]
+            out.headers["X-PicCrawler-Proxy-Fallback"] = "direct-redirect"
+            return out
         return jsonify({"error": f"image proxy failed: {warn}"}), 502
 
     content_type = resp.headers.get("Content-Type", "image/jpeg")
@@ -744,7 +767,44 @@ def _is_rule_online_enabled(rule_id: str) -> bool:
 
 
 def _cleanup_stale_download_jobs() -> None:
-    # If there is at least one running task, queued tasks are still valid.
+    now = datetime.utcnow()
+    # Clean up crashed "running" jobs first. A healthy worker updates progress
+    # frequently; stale running rows usually indicate worker/thread interruption.
+    running_rows = query_all(
+        "SELECT job_id, updated_at FROM download_jobs WHERE status = 'running' ORDER BY updated_at DESC"
+    )
+    stale_running_ids: list[str] = []
+    for row in running_rows:
+        updated_at = str(row["updated_at"] or "").strip()
+        if not updated_at:
+            stale_running_ids.append(str(row["job_id"]))
+            continue
+        try:
+            ts = datetime.fromisoformat(updated_at)
+        except ValueError:
+            stale_running_ids.append(str(row["job_id"]))
+            continue
+        # Keep threshold conservative to avoid killing slow but healthy downloads.
+        if now - ts > timedelta(minutes=20):
+            stale_running_ids.append(str(row["job_id"]))
+
+    for job_id in stale_running_ids:
+        execute(
+            """
+            UPDATE download_jobs
+            SET status='failed',
+                error_message=CASE
+                    WHEN error_message IS NULL OR error_message = ''
+                    THEN '任务长时间无进度，已自动结束'
+                    ELSE error_message
+                END,
+                updated_at=?
+            WHERE job_id=?
+            """,
+            (now.isoformat(timespec="seconds"), job_id),
+        )
+
+    # If there is still at least one running task, queued tasks are still valid.
     running_row = query_one("SELECT COUNT(1) AS cnt FROM download_jobs WHERE status = 'running'")
     running_count = int(running_row["cnt"]) if running_row else 0
     if running_count > 0:
@@ -756,7 +816,6 @@ def _cleanup_stale_download_jobs() -> None:
     if not rows:
         return
 
-    now = datetime.utcnow()
     stale_ids: list[str] = []
     for row in rows:
         updated_at = str(row["updated_at"] or "").strip()
@@ -831,7 +890,7 @@ def _save_topics(rule_id: str, page_no: int, topics: list[dict]) -> None:
 
 
 def _is_low_quality_gallery_url(rule_id: str, url: str) -> bool:
-    if rule_id not in {"wnacg", "manxiangge"}:
+    if rule_id not in {"wnacg", "manxiangge", "hotgirl"}:
         return False
 
     lower = str(url or "").lower()
@@ -841,6 +900,19 @@ def _is_low_quality_gallery_url(rule_id: str, url: str) -> bool:
     parsed = urlparse(lower)
     host = parsed.hostname or ""
     path = parsed.path or ""
+
+    if rule_id == "hotgirl":
+        if "wp-postratings" in path:
+            return True
+        if "/wp-content/themes/" in path:
+            return True
+        if host in {"hotgirl.asia", "www.hotgirl.asia"} and re.search(
+            r"-\d+x\d+\.(jpg|jpeg|png|webp|avif)$",
+            path,
+        ):
+            # Typical list/related thumbnail pattern, not gallery original.
+            return True
+        return False
 
     # Legacy malformed output like https://www.wnacg.com//t4.xxx/data/t/...
     if host in {"www.wnacg.com", "wnacg.com"} and path.startswith("//"):
@@ -865,7 +937,7 @@ def _cached_images_need_refresh(rule_id: str, urls: list[str]) -> bool:
         # Hitomi URL algorithm updates can invalidate cached domains/paths;
         # always refresh to avoid serving stale 404 links.
         return True
-    if rule_id not in {"wnacg", "manxiangge"}:
+    if rule_id not in {"wnacg", "manxiangge", "hotgirl"}:
         return False
 
     return any(_is_low_quality_gallery_url(rule_id, u) for u in urls)
@@ -885,15 +957,14 @@ def _get_or_fetch_images(rule_id: str, topic_id: str, detail_url: str) -> list[s
     if rows:
         cached = [str(r["image_url"]) for r in rows]
         cached = [u for u in cached if _is_displayable_image_url(u)]
-        # 4KHD previously cached only first page images; compare with declared
-        # gallery total to auto-refresh stale cache.
-        if rule_id == "4khd" and cached:
+        # Auto-refresh stale cache by comparing declared gallery total.
+        if rule_id in {"4khd", "hotgirl"} and cached:
             try:
                 crawler = build_crawler(rule_id)
                 count_fetcher = getattr(crawler, "topic_image_count", None)
                 if callable(count_fetcher):
                     declared_count = max(0, int(count_fetcher(detail_url)))
-                    if declared_count > len(cached):
+                    if declared_count > 0 and declared_count != len(cached):
                         cached = []
             except Exception:  # noqa: BLE001
                 pass
@@ -1147,6 +1218,8 @@ def _try_fetch_image(url: str, headers: dict[str, str]) -> RequestsResponse:
 def _looks_like_image_response(resp: RequestsResponse, request_url: str) -> bool:
     content_type = (resp.headers.get("Content-Type") or "").lower()
     if content_type.startswith("image/"):
+        return True
+    if resp.status_code == 200 and content_type.startswith("application/octet-stream"):
         return True
 
     path_lower = urlparse(request_url).path.lower()

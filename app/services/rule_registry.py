@@ -3,9 +3,11 @@ from __future__ import annotations
 from app.database import query_all, query_one
 from app.services.crawler_4khd import Crawler4KHD
 from app.services.crawler_asmhentai import CrawlerAsmhentai
+from app.services.crawler_hotgirl import CrawlerHotgirl
 from app.services.crawler_hitomi import CrawlerHitomi
 from app.services.crawler_wnacg import CrawlerWnacg
 from app.services.crawler_youwu import CrawlerYouwu
+from app.services.crawler_xchina import CrawlerXChina
 
 _CRAWLER_MAP = {
     "crawler_4khd": Crawler4KHD,
@@ -13,6 +15,8 @@ _CRAWLER_MAP = {
     "crawler_wnacg": CrawlerWnacg,
     "crawler_hitomi": CrawlerHitomi,
     "crawler_youwu": CrawlerYouwu,
+    "crawler_hotgirl": CrawlerHotgirl,
+    "crawler_xchina": CrawlerXChina,
 }
 
 _CRAWLER_CAPABILITIES = {
@@ -21,6 +25,8 @@ _CRAWLER_CAPABILITIES = {
     "crawler_wnacg": {"supports_search": 1, "categories": [1, 9, 10]},
     "crawler_hitomi": {"supports_search": 1, "categories": []},
     "crawler_youwu": {"supports_search": 1, "categories": []},
+    "crawler_hotgirl": {"supports_search": 1, "categories": []},
+    "crawler_xchina": {"supports_search": 1, "categories": []},
 }
 
 
