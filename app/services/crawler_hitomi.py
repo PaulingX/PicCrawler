@@ -159,6 +159,9 @@ class CrawlerHitomi(BaseCrawler):
         if "hitomi.la/search.html?" in lower:
             text = text.split("?", 1)[-1].strip()
 
+        if "#" in text:
+            text = text.split("#", 1)[0].strip()
+
         # Frontend may pass a decoded query; users may also paste encoded form.
         if "%" in text:
             try:
