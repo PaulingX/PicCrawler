@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from io import BytesIO
+import atexit
 import logging
-import queue
+import os
 import re
 import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -17,36 +18,33 @@ from flask import Flask
 
 from app.config import USER_AGENT
 from app.database import execute
+from app.services.hitomi_urls import hitomi_candidate_urls
 from app.services.library_scanner import upsert_downloaded_topic
-from app.services.utils import guess_ext, sanitize_name
+from app.services.utils import guess_ext, sanitize_name, utcnow_str
 
 _LOG = logging.getLogger(__name__)
-_HITOMI_IMAGE_HOSTS = {
-    "gold-usergeneratedcontent.net",
-    "ltn.gold-usergeneratedcontent.net",
-    "a.gold-usergeneratedcontent.net",
-    "a1.gold-usergeneratedcontent.net",
-    "a2.gold-usergeneratedcontent.net",
-    "w1.gold-usergeneratedcontent.net",
-    "w2.gold-usergeneratedcontent.net",
-    "1.gold-usergeneratedcontent.net",
-    "2.gold-usergeneratedcontent.net",
-    "atn.gold-usergeneratedcontent.net",
-    "btn.gold-usergeneratedcontent.net",
-    "tn.hitomi.la",
-}
-
-
 class DownloadWorker:
-    def __init__(self, app: Flask) -> None:
+    def __init__(self, app: Flask, max_workers: int | None = None) -> None:
         self.app = app
+        if max_workers is None:
+            max_workers = int(os.environ.get("PICCRAWLER_DOWNLOAD_WORKERS") or os.environ.get("CONCURRENCY") or "4")
+        self.max_workers = max(int(max_workers), 1)
+        # 单主题内部并发下载的图片数（对远端限流敏感，默认保守 3）。
+        self.image_workers = max(1, int(os.environ.get("PICCRAWLER_IMAGE_WORKERS") or "3"))
         # Recover interrupted tasks from previous process to avoid
         # leaving stale queued/running items in UI forever.
         with self.app.app_context():
             self._recover_interrupted_jobs()
-        self._queue: queue.Queue[dict] = queue.Queue()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        # 线程池并发：多个主题的下载任务可同时进行；主题内部再按
+        # image_workers 并发拉取图片，文件名带序号，与完成顺序无关。
+        self._executor = ThreadPoolExecutor(
+            max_workers=self.max_workers,
+            thread_name_prefix="piccrawler-dl",
+        )
+        self._registry_lock = threading.Lock()
+        self._futures: dict[str, Future] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
+        atexit.register(self.shutdown)
 
     def submit(
         self,
@@ -57,7 +55,7 @@ class DownloadWorker:
         target_dir: str,
         image_urls: list[str],
     ) -> str:
-        now = _utcnow()
+        now = utcnow_str()
         job_id = str(uuid.uuid4())
         execute(
             """
@@ -78,7 +76,9 @@ class DownloadWorker:
                 now,
             ),
         )
-        self._queue.put(
+        cancel_event = threading.Event()
+        future = self._executor.submit(
+            self._run_task_safe,
             {
                 "job_id": job_id,
                 "rule_id": rule_id,
@@ -86,28 +86,65 @@ class DownloadWorker:
                 "target_dir": target_dir,
                 "detail_url": detail_url,
                 "image_urls": image_urls,
-            }
+                "cancel_event": cancel_event,
+            },
         )
+        with self._registry_lock:
+            self._futures[job_id] = future
+            self._cancel_events[job_id] = cancel_event
         return job_id
 
-    def _loop(self) -> None:
-        while True:
-            task = self._queue.get()
+    def cancel(self, job_id: str) -> bool:
+        """取消任务：排队中的直接出队，运行中的在下张图片前停止。
+
+        返回 False 表示任务已不在执行登记中（已完成或已被清理）。
+        """
+        with self._registry_lock:
+            future = self._futures.get(job_id)
+            event = self._cancel_events.get(job_id)
+        if future is None:
+            return False
+        if future.cancel():
+            self._forget(job_id)
+            with self.app.app_context():
+                self._mark_canceled(job_id)
+            return True
+        if event is not None:
+            event.set()
+            return True
+        return False
+
+    def _forget(self, job_id: str) -> None:
+        with self._registry_lock:
+            self._futures.pop(job_id, None)
+            self._cancel_events.pop(job_id, None)
+
+    def _run_task_safe(self, task: dict) -> None:
+        try:
+            with self.app.app_context():
+                self._run_task(task)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.exception("download task crashed: %s", task.get("job_id") if isinstance(task, dict) else "")
             try:
-                if task is None:
-                    return
-                with self.app.app_context():
-                    self._run_task(task)
-            except Exception as exc:  # noqa: BLE001
-                _LOG.exception("download task crashed: %s", task.get("job_id") if isinstance(task, dict) else "")
                 with self.app.app_context():
                     self._mark_task_failed(task, exc)
-            finally:
-                self._queue.task_done()
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            if isinstance(task, dict):
+                self._forget(str(task.get("job_id", "")))
+
+    def shutdown(self) -> None:
+        """进程退出时释放线程池（放弃在途任务，下次启动会回收为失败）。"""
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _run_task(self, task: dict) -> None:
         job_id = task["job_id"]
-        now = _utcnow()
+        cancel_event: threading.Event = task["cancel_event"]
+        now = utcnow_str()
         _execute_with_retry(
             "UPDATE download_jobs SET status='running', updated_at=? WHERE job_id=?",
             (now, job_id),
@@ -116,13 +153,25 @@ class DownloadWorker:
         target = Path(task["target_dir"]).resolve() / sanitize_name(task["title"])
         target.mkdir(parents=True, exist_ok=True)
 
-        downloaded = 0
-        errors: list[str] = []
         image_urls: list[str] = task["image_urls"]
         detail_url = str(task.get("detail_url", "")).strip()
+        rule_id = str(task.get("rule_id", "")).strip()
         session = requests.Session()
 
-        for idx, url in enumerate(image_urls, start=1):
+        # idx -> 错误信息（空串为成功）；并发写统一走 state_lock。
+        results: dict[int, str] = {}
+        state_lock = threading.Lock()
+
+        def _flush_progress() -> None:
+            with state_lock:
+                ok = sum(1 for err in results.values() if not err)
+            _execute_with_retry(
+                "UPDATE download_jobs SET downloaded_images=?, updated_at=? WHERE job_id=?",
+                (ok, utcnow_str(), job_id),
+            )
+
+        def _attempt(idx: int, url: str) -> str:
+            """下载单张图片并落盘，返回错误信息（空串为成功）。"""
             try:
                 res, final_url = _download_image_with_fallbacks(
                     session=session,
@@ -130,7 +179,7 @@ class DownloadWorker:
                     referer=detail_url,
                 )
                 should_convert = _should_convert_hitomi_avif(
-                    rule_id=str(task.get("rule_id", "")).strip(),
+                    rule_id=rule_id,
                     final_url=final_url,
                     content_type=res.headers.get("Content-Type", ""),
                 )
@@ -148,28 +197,56 @@ class DownloadWorker:
                             if chunk:
                                 f.write(chunk)
                     res.close()
-                downloaded += 1
+                return ""
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"{idx}:{exc}")
+                return f"{idx}:{exc}"
 
-            _execute_with_retry(
-                """
-                UPDATE download_jobs
-                SET downloaded_images=?, updated_at=?
-                WHERE job_id=?
-                """,
-                (downloaded, _utcnow(), job_id),
-            )
+        def _run_batch(items: list[tuple[int, str]]) -> None:
+            """并发执行一批图片下载；取消时停止调度尚未开始的图片。"""
+            if not items:
+                return
+            workers = min(self.image_workers, len(items))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="piccrawler-img") as pool:
+                futures = {pool.submit(_attempt, idx, url): idx for idx, url in items}
+                try:
+                    for future in as_completed(futures):
+                        idx = futures[future]
+                        with state_lock:
+                            results[idx] = future.result()
+                        _flush_progress()
+                        if cancel_event.is_set():
+                            break
+                finally:
+                    for future in futures:
+                        future.cancel()
 
-        final_status = "done" if downloaded > 0 and downloaded == len(image_urls) else "partial"
-        if downloaded == 0:
+        pending = list(enumerate(image_urls, start=1))
+        _run_batch(pending)
+
+        # 失败的图片统一重试一轮：远端偶发 5xx/超时常能恢复，提高完成率。
+        if not cancel_event.is_set():
+            failed = [(idx, url) for idx, url in pending if results.get(idx)]
+            if failed:
+                _run_batch(failed)
+
+        with state_lock:
+            downloaded = sum(1 for err in results.values() if not err)
+            errors = [results[idx] for idx in sorted(results) if results[idx]]
+
+        if downloaded == len(image_urls):
+            final_status = "done"
+        elif cancel_event.is_set():
+            final_status = "canceled"
+        elif downloaded > 0:
+            final_status = "partial"
+        else:
             final_status = "failed"
 
         sync_error = ""
         if downloaded > 0:
             try:
                 upsert_downloaded_topic(
-                    rule_id=str(task.get("rule_id", "")).strip(),
+                    rule_id=rule_id,
                     root_dir=str(task["target_dir"]),
                     topic_dir=str(target),
                     title_hint=str(task.get("title", "")).strip(),
@@ -184,10 +261,26 @@ class DownloadWorker:
         _execute_with_retry(
             """
             UPDATE download_jobs
-            SET status=?, error_message=?, updated_at=?
+            SET status=?, downloaded_images=?, error_message=?, updated_at=?
             WHERE job_id=?
             """,
-            (final_status, merged_errors, _utcnow(), job_id),
+            (final_status, downloaded, merged_errors, utcnow_str(), job_id),
+        )
+
+    def _mark_canceled(self, job_id: str) -> None:
+        _execute_with_retry(
+            """
+            UPDATE download_jobs
+            SET status='canceled',
+                error_message=CASE
+                    WHEN error_message IS NULL OR error_message = ''
+                    THEN '任务已取消'
+                    ELSE error_message
+                END,
+                updated_at=?
+            WHERE job_id=? AND status IN ('queued', 'running')
+            """,
+            (utcnow_str(), job_id),
         )
 
     def _mark_task_failed(self, task: dict | None, exc: Exception) -> None:
@@ -211,11 +304,11 @@ class DownloadWorker:
                 updated_at=?
             WHERE job_id=? AND status IN ('queued', 'running')
             """,
-            (message, message, _utcnow(), job_id),
+            (message, message, utcnow_str(), job_id),
         )
 
     def _recover_interrupted_jobs(self) -> None:
-        now = _utcnow()
+        now = utcnow_str()
         _execute_with_retry(
             """
             UPDATE download_jobs
@@ -256,74 +349,6 @@ def _normalize_download_image_url(url: str) -> str:
     return url
 
 
-def _hitomi_candidate_urls(url: str) -> list[str]:
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    path = parsed.path or ""
-    if host not in _HITOMI_IMAGE_HOSTS:
-        return []
-
-    candidates: list[str] = []
-
-    def _push(candidate: str) -> None:
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
-
-    _push(url)
-
-    alt_hosts: list[str] = []
-    if host.startswith("atn."):
-        alt_hosts.append("btn." + host[4:])
-    elif host.startswith("btn."):
-        alt_hosts.append("atn." + host[4:])
-    elif host.startswith("a1."):
-        alt_hosts.append("a2." + host[3:])
-    elif host.startswith("a2."):
-        alt_hosts.append("a1." + host[3:])
-    elif host.startswith("w1."):
-        alt_hosts.append("w2." + host[3:])
-    elif host.startswith("w2."):
-        alt_hosts.append("w1." + host[3:])
-    elif host.startswith("1."):
-        alt_hosts.append("2." + host[2:])
-    elif host.startswith("2."):
-        alt_hosts.append("1." + host[2:])
-
-    for alt_host in alt_hosts:
-        netloc = alt_host if parsed.port is None else f"{alt_host}:{parsed.port}"
-        _push(parsed._replace(netloc=netloc).geturl())
-
-    m = re.match(r"^/([^/]+/\d+/[0-9a-f]{64})\.(avif|webp)$", path, re.IGNORECASE)
-    if m:
-        stem = m.group(1)
-        ext = m.group(2).lower()
-        if ext == "avif":
-            _push(parsed._replace(path=f"/{stem}.webp").geturl())
-        else:
-            _push(parsed._replace(path=f"/{stem}.avif").geturl())
-        for image_ext in ("jpg", "jpeg", "png", "gif"):
-            _push(parsed._replace(path=f"/images/{stem}.{image_ext}").geturl())
-
-    m = re.match(r"^/(images/)?([^/]+)/(\d+)/([0-9a-f]{64})\.(\w+)$", path, re.IGNORECASE)
-    if m:
-        prefix = m.group(1) or ""
-        b_value = m.group(2)
-        current_seg = m.group(3)
-        hash_value = m.group(4).lower()
-        ext = m.group(5)
-
-        segment_values = {
-            str(int(hash_value[-3:], 16)),
-            str(int(hash_value[-1] + hash_value[-3:-1], 16)),
-            str(int(hash_value[-2:], 16)),
-        }
-        segment_values.discard(current_seg)
-        for seg in segment_values:
-            _push(parsed._replace(path=f"/{prefix}{b_value}/{seg}/{hash_value}.{ext}").geturl())
-
-    return candidates
-
-
 def _candidate_download_urls(url: str) -> list[str]:
     raw = str(url or "").strip()
     normalized = _normalize_download_image_url(raw)
@@ -336,8 +361,8 @@ def _candidate_download_urls(url: str) -> list[str]:
         if parsed.scheme == "https":
             candidates.append(urlunparse(("http", parsed.netloc, parsed.path, "", parsed.query, "")))
 
-    candidates.extend(_hitomi_candidate_urls(normalized))
-    candidates.extend(_hitomi_candidate_urls(raw))
+    candidates.extend(hitomi_candidate_urls(normalized))
+    candidates.extend(hitomi_candidate_urls(raw))
 
     unique: list[str] = []
     seen: set[str] = set()
@@ -392,10 +417,6 @@ def _download_image_with_fallbacks(
                 continue
 
     raise RuntimeError(";".join(errors[:8]) or "download failed")
-
-
-def _utcnow() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
 
 
 def _should_convert_hitomi_avif(rule_id: str, final_url: str, content_type: str) -> bool:

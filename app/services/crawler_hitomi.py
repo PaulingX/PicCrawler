@@ -14,7 +14,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from app.config import USER_AGENT
-from app.services.crawler_base import BaseCrawler
+from app.services.crawler_base import BaseCrawler, make_session
 
 _GALLERY_ID_PATTERN = re.compile(r"(?:/reader/|/galleries/)(\d+)(?:\.html)?", re.IGNORECASE)
 _NOZOMI_INT_SIZE = 4
@@ -48,6 +48,7 @@ class _GgParams:
 
 
 class CrawlerHitomi(BaseCrawler):
+    supports_search = True
     base_url = "https://hitomi.la/index-chinese.html"
     page_size = 25
     scan_batch = 120
@@ -60,7 +61,7 @@ class CrawlerHitomi(BaseCrawler):
     search_domain = "ltn.gold-usergeneratedcontent.net"
 
     def __init__(self) -> None:
-        self.session = requests.Session()
+        self.session = make_session("")
         self.session.headers.update(
             {
                 "User-Agent": USER_AGENT,
@@ -1089,21 +1090,17 @@ class CrawlerHitomi(BaseCrawler):
         name = str(file_item.get("name") or "").lower().strip()
         ext = name.rsplit(".", 1)[-1] if "." in name else ""
 
-        # Hitomi often provides both AVIF and WEBP. Prefer WEBP first to avoid
-        # client-side decode failures in some environments.
+        # 可用性只由 haswebp / hasavif 标志决定：name 以 .webp 结尾
+        # 不代表 CDN 上存在 webp 文件（大量画廊仅有 AVIF），
+        # 按文件名猜扩展会产生全量 404 的图片 URL。
         if bool(file_item.get("haswebp")):
             return "webp", "webp"
-        if ext == "webp":
-            return "webp", "webp"
-
         if bool(file_item.get("hasavif")):
             return "avif", "avif"
-        if ext == "avif":
-            return "avif", "avif"
 
-        if ext not in _IMAGE_EXTS:
-            ext = "jpg"
-        if not ext:
+        # 两个标志都没有时只可能存在原始位图；webp/avif 的存在性
+        # 正是由这两个标志声明的，不能按文件名放行。
+        if ext not in {"jpg", "jpeg", "png", "gif"}:
             ext = "jpg"
         return ext, ext
 

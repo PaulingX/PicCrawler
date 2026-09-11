@@ -8,8 +8,13 @@ from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
 import requests
 from bs4 import BeautifulSoup
 
+try:
+    import cloudscraper
+except Exception:  # noqa: BLE001
+    cloudscraper = None
+
 from app.config import USER_AGENT
-from app.services.crawler_base import BaseCrawler
+from app.services.crawler_base import BaseCrawler, make_session
 
 _IMAGE_PATTERN = re.compile(
     r"https?:\/\/[^\"'\s]+?\.(?:jpg|jpeg|png|webp|gif|avif)(?:\?[^\"'\s]*)?",
@@ -29,26 +34,22 @@ _FULL_SEQ_PATTERN = re.compile(r"^(.*?/)(\d+)\.(jpg|jpeg|png|webp|gif|avif)$", r
 
 
 class CrawlerAsmhentai(BaseCrawler):
+    supports_search = True
     base_url = "https://asmhentai.com/language/chinese/"
 
     def __init__(self) -> None:
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": USER_AGENT})
         proxy = str(os.getenv("PICCRAWLER_PROXY", "")).strip()
-        if proxy:
-            self.session.proxies.update({"http": proxy, "https": proxy})
+        self.session = make_session(proxy)
 
     def list_topics(self, page_no: int, query: str = "") -> list[dict]:
         page_no = max(1, int(page_no))
         keyword = query.strip()
         for page_url in self._build_list_urls(page_no=page_no, keyword=keyword):
-            try:
-                res = self.session.get(page_url, timeout=25)
-                res.raise_for_status()
-            except Exception:  # noqa: BLE001
+            status, html = self._request_page(page_url, timeout=25)
+            if status == 0 and not html:
                 continue
 
-            topics = self._parse_topics_from_html(res.text or "")
+            topics = self._parse_topics_from_html(html)
             if topics:
                 return topics
 
@@ -219,9 +220,9 @@ class CrawlerAsmhentai(BaseCrawler):
         return self._topic_images_fallback(detail_url=detail_url, soup=soup, raw_html=raw)
 
     def _fetch_detail(self, detail_url: str) -> tuple[BeautifulSoup, str]:
-        res = self.session.get(detail_url, timeout=25)
-        res.raise_for_status()
-        raw = res.text or ""
+        status, raw = self._request_page(detail_url, timeout=25)
+        if status == 0 and not raw:
+            raise RuntimeError(f"抓取详情页失败: {detail_url}")
         soup = BeautifulSoup(raw, "html.parser")
         return soup, raw
 
@@ -317,18 +318,16 @@ class CrawlerAsmhentai(BaseCrawler):
             gallery_pages.append(page_url)
 
         for page_url in gallery_pages:
-            try:
-                page_res = self.session.get(page_url, timeout=25)
-                page_res.raise_for_status()
-            except Exception:  # noqa: BLE001
+            status, page_text = self._request_page(page_url, timeout=25)
+            if status == 0 and not page_text:
                 continue
 
-            page_soup = BeautifulSoup(page_res.text, "html.parser")
+            page_soup = BeautifulSoup(page_text, "html.parser")
             page_img = page_soup.select_one("img#fimg, #fimg, .image img, img[data-src]")
             if page_img:
                 _push(self._extract_image_from_tag(page_img, page_url))
 
-            for match in _IMAGE_PATTERN.findall(page_res.text):
+            for match in _IMAGE_PATTERN.findall(page_text):
                 _push(match)
 
         for script in soup.select("script"):

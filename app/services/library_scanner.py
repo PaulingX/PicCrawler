@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 from collections import deque
-from datetime import datetime
 from pathlib import Path
 
 from app.database import execute, query_all, query_one
-from app.services.utils import list_direct_images
+from app.services.utils import list_direct_images, utcnow_str
 
 # Scan folder and subfolders up to 2 levels.
 MAX_DEPTH = 2
@@ -61,7 +60,7 @@ def refresh_shelf(shelf_id: int) -> dict:
                     rel_path,
                     str(cover.resolve()) if cover else "",
                     len(images),
-                    _utcnow(),
+                    utcnow_str(),
                 ),
             )
             topic_id = int(cur.lastrowid)
@@ -77,7 +76,7 @@ def refresh_shelf(shelf_id: int) -> dict:
 
     execute(
         "UPDATE shelves SET updated_at = ? WHERE shelf_id = ?",
-        (_utcnow(), shelf_id),
+        (utcnow_str(), shelf_id),
     )
     return {"topics": topic_count, "images": image_count}
 
@@ -91,7 +90,7 @@ def ensure_rule_shelf(rule_id: str, name: str, roots: list[str]) -> int:
     if row:
         execute(
             "UPDATE shelves SET name=?, roots_json=?, source_type='rule', updated_at=? WHERE shelf_id=?",
-            (name, roots_json, _utcnow(), row["shelf_id"]),
+            (name, roots_json, utcnow_str(), row["shelf_id"]),
         )
         return int(row["shelf_id"])
 
@@ -100,7 +99,7 @@ def ensure_rule_shelf(rule_id: str, name: str, roots: list[str]) -> int:
         INSERT INTO shelves(name, roots_json, source_type, rule_id, updated_at)
         VALUES(?, ?, 'rule', ?, ?)
         """,
-        (name, roots_json, rule_id, _utcnow()),
+        (name, roots_json, rule_id, utcnow_str()),
     )
     return int(cur.lastrowid)
 
@@ -111,7 +110,7 @@ def create_custom_shelf(name: str, roots: list[str]) -> int:
         INSERT INTO shelves(name, roots_json, source_type, rule_id, updated_at)
         VALUES(?, ?, 'custom', NULL, ?)
         """,
-        (name, json.dumps(roots, ensure_ascii=False), _utcnow()),
+        (name, json.dumps(roots, ensure_ascii=False), utcnow_str()),
     )
     return int(cur.lastrowid)
 
@@ -200,7 +199,7 @@ def upsert_downloaded_topic(rule_id: str, root_dir: str, topic_dir: str, title_h
     topic_key = f"{root_path}::{rel_path}"
     title = str(title_hint).strip() or folder.name
     cover_path = str(images[0].resolve())
-    now = _utcnow()
+    now = utcnow_str()
 
     row = query_one(
         "SELECT topic_id FROM library_topics WHERE shelf_id = ? AND topic_key = ?",
@@ -262,9 +261,5 @@ def _walk_folders(root: Path, max_depth: int) -> list[Path]:
             queue.append((child, depth + 1))
 
     return results
-
-
-def _utcnow() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
 
 

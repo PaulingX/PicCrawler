@@ -13,6 +13,7 @@ from app.services.crawler_base import BaseCrawler
 
 
 class CrawlerXChina(BaseCrawler):
+    supports_search = True
     base_url = "https://xchina.co/"
 
     def __init__(self) -> None:
@@ -98,7 +99,10 @@ class CrawlerXChina(BaseCrawler):
             ]
 
         if page_no <= 1:
-            return [urljoin(self.base_url, "photos.html")]
+            return [
+                urljoin(self.base_url, "photos/1.html"),
+                urljoin(self.base_url, "photos.html"),
+            ]
         return [
             urljoin(self.base_url, f"photos/{page_no}.html"),
         ]

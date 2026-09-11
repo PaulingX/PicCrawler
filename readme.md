@@ -90,8 +90,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1 -Python "C:\Pyt
 
 ### 7、主要目录
 - `main.py`: 启动入口
-- `app/routes.py`: Flask API 与页面路由
-- `app/database.py`: SQLite 初始化与访问
+- `app/routes.py`: 蓝图注册聚合（向后兼容再导出）
+- `app/api/`: 按域拆分的 Flask 蓝图（system / rules / online / download / library）
+- `app/services/image_proxy.py`: 图片 URL 归一化、代理与回退抓取
+- `app/database.py`: SQLite 初始化与访问（WAL 并发）
 - `app/services/crawler_4khd.py`: 4khd 抓取规则
 - `app/services/crawler_asmhentai.py`: ASMHentai 中文规则
 - `app/services/crawler_youwu.py`: 尤物丧志规则（分页 + 搜索）
@@ -99,7 +101,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1 -Python "C:\Pyt
 - `app/services/crawler_wnacg.py`: WNACG 规则（分类 + 搜索）
 - `app/services/crawler_manxiangge.py`: 漫香阁规则（自动域名 + 分类 + 搜索）
 - `app/services/crawler_hitomi.py`: Hitomi 中文规则（标签 + 搜索）
-- `app/services/download_worker.py`: 后台下载队列
+- `app/services/download_worker.py`: 后台下载（主题级 + 图片级并发、失败重试、可取消）
 - `app/services/library_scanner.py`: 本地书架扫描入库
 - `app/templates/index.html`: 前端页面
 - `app/static/app.js`: 前端交互

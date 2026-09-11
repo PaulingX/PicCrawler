@@ -43,7 +43,8 @@ class CrawlerWnacg(BaseCrawler):
         "https://www.wnacg.com/",
         "https://wnacg.com/",
     )
-    category_ids = (1, 9, 10)
+    category_ids = (1, 9, 10, 20)
+    categories = [1, 9, 10, 20]
     supports_search = True
     site_label = "wnacg"
 
@@ -419,20 +420,20 @@ class CrawlerWnacg(BaseCrawler):
     def _build_category_url(self, category_id: int, page_no: int) -> str:
         base = self._get_base_url()
         if page_no <= 1:
-            return urljoin(base, f"albums-index-cate-{category_id}.html")
+            return urljoin(base, f"albums-index-page-1-cate-{category_id}.html")
         return urljoin(base, f"albums-index-page-{page_no}-cate-{category_id}.html")
 
     def _build_search_urls(self, keyword: str, page_no: int) -> list[str]:
         base = self._get_base_url()
         q = quote_plus(keyword)
-        common = f"q={q}&f=_all&s=create_time_DESC&syn=yes"
+        common = f"q={q}&m=&syn=yes&f=_all&s=create_time_DESC"
         if page_no <= 1:
-            return [f"{base}search/?{common}"]
-
+            return [
+                urljoin(base, f"search/index.php?{common}&p=1"),
+                urljoin(base, f"search/index.php?{common}"),
+            ]
         return [
-            f"{base}search/?{common}&p={page_no}",
-            f"{base}search/?{common}&page={page_no}",
-            f"{base}search/?{common}",
+            urljoin(base, f"search/index.php?{common}&p={page_no}"),
         ]
 
     def _parse_topics(self, html: str, base_url: str) -> list[dict]:
@@ -531,7 +532,7 @@ class CrawlerWnacg(BaseCrawler):
         probe_category = int(self.category_ids[0]) if self.category_ids else 1
 
         for candidate in candidates:
-            probe_url = urljoin(candidate, f"albums-index-cate-{probe_category}.html")
+            probe_url = urljoin(candidate, f"albums-index-page-1-cate-{probe_category}.html")
             html = self._fetch_page_html(probe_url, timeout=8.0, max_attempts=6)
             if html:
                 self._resolved_base_url = candidate

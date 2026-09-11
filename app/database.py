@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime
 from pathlib import Path
 
 from flask import current_app, g
+
+from app.services.utils import utcnow_str
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS rules (
@@ -147,13 +148,18 @@ DEFAULT_RULES = [
 DEPRECATED_RULE_IDS = ["manxiangge"]
 
 
-def _utcnow() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
-
-
 def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    # timeout 让写锁在并发（线程池下载 + 在线抓取）下自动等待而非立刻报错；
+    # WAL + busy_timeout 是多写者并发的基础。
+    conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        # 个别环境（如内存库）不支持 WAL，忽略即可，不影响功能。
+        pass
     return conn
 
 
@@ -267,7 +273,7 @@ def init_db(db_path: Path, download_root: Path) -> None:
                     source_type = 'rule',
                     updated_at = excluded.updated_at
                 """,
-                (f"{rule['name']} 下载目录", roots_json, rule["rule_id"], _utcnow()),
+                (f"{rule['name']} 下载目录", roots_json, rule["rule_id"], utcnow_str()),
             )
 
         conn.commit()

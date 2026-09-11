@@ -5,14 +5,14 @@ import os
 import re
 from urllib.parse import quote, urljoin, urlparse, urlunparse
 
-import requests
 from bs4 import BeautifulSoup
 
 from app.config import USER_AGENT
-from app.services.crawler_base import BaseCrawler
+from app.services.crawler_base import BaseCrawler, make_session
 
 
 class Crawler4KHD(BaseCrawler):
+    supports_search = True
     base_url = "https://www.4khd.com/"
     bootstrap_urls = (
         "https://www.4khd.com/",
@@ -22,11 +22,10 @@ class Crawler4KHD(BaseCrawler):
     )
 
     def __init__(self) -> None:
-        self.session = requests.Session()
+        # 镜像站（*.uuss.uk / *.ssuu.uk）目前启用了 Cloudflare 挑战页，
+        # 裸 requests.Session 会被拦截；统一走 make_session 的 cloudscraper。
+        self.session = make_session(str(os.getenv("PICCRAWLER_PROXY", "")).strip())
         self.session.headers.update({"User-Agent": USER_AGENT})
-        proxy = str(os.getenv("PICCRAWLER_PROXY", "")).strip()
-        if proxy:
-            self.session.proxies.update({"http": proxy, "https": proxy})
 
         self._resolved_base_url: str | None = None
         self._known_hosts: set[str] = {"4khd.com", "www.4khd.com"}
@@ -36,13 +35,11 @@ class Crawler4KHD(BaseCrawler):
         keyword = str(query or "").strip()
 
         for page_url in self._build_list_urls(page_no=page_no, keyword=keyword):
-            try:
-                res = self.session.get(page_url, timeout=20)
-                res.raise_for_status()
-            except Exception:  # noqa: BLE001
+            status, html = self._request_page(page_url, timeout=20)
+            if status == 0 and not html:
                 continue
 
-            topics = self._parse_topics_from_html(res.text or "")
+            topics = self._parse_topics_from_html(html)
             if topics:
                 return topics
 

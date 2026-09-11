@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
+
+
+def utcnow() -> datetime:
+    """当前 UTC 时间。
+
+    返回 naive datetime（与数据库中历史 ISO 字符串同基准），
+    避免弃用的 datetime.utcnow()，也避免 naive/aware 混算。
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utcnow_str() -> str:
+    """当前 UTC 时间的 ISO 字符串（秒精度），数据库时间戳统一使用。"""
+    return utcnow().isoformat(timespec="seconds")
 
 
 def natural_key(value: str) -> list:

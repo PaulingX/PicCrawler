@@ -19,15 +19,19 @@ _CRAWLER_MAP = {
     "crawler_xchina": CrawlerXChina,
 }
 
-_CRAWLER_CAPABILITIES = {
-    "crawler_4khd": {"supports_search": 1, "categories": []},
-    "crawler_asmhentai": {"supports_search": 1, "categories": []},
-    "crawler_wnacg": {"supports_search": 1, "categories": [1, 9, 10]},
-    "crawler_hitomi": {"supports_search": 1, "categories": []},
-    "crawler_youwu": {"supports_search": 1, "categories": []},
-    "crawler_hotgirl": {"supports_search": 1, "categories": []},
-    "crawler_xchina": {"supports_search": 1, "categories": []},
-}
+# 能力字典由 crawler 类属性派生（单一事实来源），不再手工维护平行表。
+# 校验：_CRAWLER_MAP 中的每个类都应声明 supports_search / categories。
+def _derive_capabilities() -> dict[str, dict]:
+    caps: dict[str, dict] = {}
+    for name, cls in _CRAWLER_MAP.items():
+        caps[name] = {
+            "supports_search": int(getattr(cls, "supports_search", False)),
+            "categories": list(getattr(cls, "categories", [])),
+        }
+    return caps
+
+
+_CRAWLER_CAPABILITIES = _derive_capabilities()
 
 
 def _with_capabilities(rule: dict) -> dict:

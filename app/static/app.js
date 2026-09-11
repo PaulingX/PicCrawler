@@ -234,7 +234,7 @@ function getOnlineCategory(ruleId) {
 function getOnlineCategoryLabel(ruleId, categoryId) {
   const id = Number(categoryId);
   if (ruleId === "wnacg" && Number.isInteger(id)) {
-    const labelMap = { 1: "汉化同人志", 9: "汉化单行本", 10: "汉化短篇" };
+    const labelMap = { 1: "汉化同人志", 9: "汉化单行本", 10: "汉化短篇", 20: "韩漫汉化" };
     return labelMap[id] || `cate-${id}`;
   }
   if (ruleId === "manxiangge" && Number.isInteger(id)) {
@@ -290,18 +290,37 @@ async function ensureOnlineTopicCount(ruleId, topic) {
     return;
   }
 
+  // 一页 20 张卡片会同时发起数量统计请求，直接打满远端站点容易触发限流；
+  // 用小队列把并发压到固定值，重复渲染同一主题也不会重复排队。
   state.topicCountLoading.add(key);
-  try {
-    const data = await fetchJSON(
-      `/api/online/topic-count?rule=${encodeURIComponent(ruleId)}&topic_id=${encodeURIComponent(
-        topic.topic_id
-      )}&detail_url=${encodeURIComponent(topic.detail_url)}`
-    );
-    setTopicCount(ruleId, topic.topic_id, data.count);
-  } catch (_) {
-    // keep placeholder if count API fails
-  } finally {
-    state.topicCountLoading.delete(key);
+  topicCountQueue.push(async () => {
+    try {
+      const data = await fetchJSON(
+        `/api/online/topic-count?rule=${encodeURIComponent(ruleId)}&topic_id=${encodeURIComponent(
+          topic.topic_id
+        )}&detail_url=${encodeURIComponent(topic.detail_url)}`
+      );
+      setTopicCount(ruleId, topic.topic_id, data.count);
+    } catch (_) {
+      // keep placeholder if count API fails
+    } finally {
+      state.topicCountLoading.delete(key);
+      topicCountActive -= 1;
+      pumpTopicCountQueue();
+    }
+  });
+  pumpTopicCountQueue();
+}
+
+const TOPIC_COUNT_MAX_CONCURRENT = 4;
+let topicCountActive = 0;
+const topicCountQueue = [];
+
+function pumpTopicCountQueue() {
+  while (topicCountActive < TOPIC_COUNT_MAX_CONCURRENT && topicCountQueue.length > 0) {
+    const task = topicCountQueue.shift();
+    topicCountActive += 1;
+    task().catch(() => {});
   }
 }
 
@@ -1308,10 +1327,32 @@ function renderJobs(items) {
   showing.forEach((job) => {
     const div = document.createElement("div");
     div.className = "job-item";
-    div.innerHTML = `
-      <div>${escapeHtml(job.title)}</div>
+
+    const info = document.createElement("div");
+    info.innerHTML = `
+      <div class="job-title">${escapeHtml(job.title)}</div>
       <div class="job-status">${escapeHtml(job.status)} · ${job.downloaded_images}/${job.total_images}</div>
     `;
+    div.appendChild(info);
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "job-cancel-btn";
+    cancelBtn.textContent = "取消";
+    cancelBtn.addEventListener("click", async () => {
+      cancelBtn.disabled = true;
+      try {
+        await fetchJSON(`/api/download/jobs/${encodeURIComponent(job.job_id)}/cancel`, {
+          method: "POST",
+        });
+        await pollJobs();
+      } catch (error) {
+        showToast(error.message);
+        cancelBtn.disabled = false;
+      }
+    });
+    div.appendChild(cancelBtn);
+
     jobListEl.appendChild(div);
   });
 

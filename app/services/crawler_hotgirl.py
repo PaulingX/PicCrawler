@@ -13,6 +13,7 @@ from app.services.crawler_base import BaseCrawler
 
 
 class CrawlerHotgirl(BaseCrawler):
+    supports_search = True
     base_url = "https://hotgirl.asia/"
     _BLOCKED_SINGLE_SLUGS = {
         "photos",

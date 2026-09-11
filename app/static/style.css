@@ -424,11 +424,42 @@ button:hover {
 }
 
 .job-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   border: 1px solid rgba(214, 171, 104, 0.25);
   border-radius: 12px;
   padding: 6px 8px;
   background: rgba(16, 16, 24, 0.55);
   font-size: 13px;
+}
+
+.job-item .job-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-cancel-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(214, 171, 104, 0.35);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.job-cancel-btn:hover:not(:disabled) {
+  color: #ff8a80;
+  border-color: rgba(255, 138, 128, 0.5);
+}
+
+.job-cancel-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .job-status {

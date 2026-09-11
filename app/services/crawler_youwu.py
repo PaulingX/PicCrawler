@@ -5,22 +5,19 @@ import os
 import re
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
-import requests
 from bs4 import BeautifulSoup
 
 from app.config import USER_AGENT
-from app.services.crawler_base import BaseCrawler
+from app.services.crawler_base import BaseCrawler, make_session
 
 
 class CrawlerYouwu(BaseCrawler):
+    supports_search = True
     base_url = "https://youwu.im/"
 
     def __init__(self) -> None:
-        self.session = requests.Session()
+        self.session = make_session(str(os.getenv("PICCRAWLER_PROXY", "")).strip())
         self.session.headers.update({"User-Agent": USER_AGENT})
-        proxy = str(os.getenv("PICCRAWLER_PROXY", "")).strip()
-        if proxy:
-            self.session.proxies.update({"http": proxy, "https": proxy})
 
     def list_topics(self, page_no: int, query: str = "") -> list[dict]:
         page_no = max(1, int(page_no))
@@ -106,12 +103,10 @@ class CrawlerYouwu(BaseCrawler):
         return [urljoin(self.base_url, f"?page={page_no}")]
 
     def _fetch_soup(self, url: str) -> BeautifulSoup | None:
-        try:
-            res = self.session.get(url, timeout=25)
-            res.raise_for_status()
-        except Exception:  # noqa: BLE001
+        status, text = self._request_page(url, timeout=25)
+        if status == 0 and not text:
             return None
-        return BeautifulSoup(res.text or "", "html.parser")
+        return BeautifulSoup(text, "html.parser")
 
     def _parse_topics_from_soup(self, soup: BeautifulSoup) -> list[dict]:
         topics: list[dict] = []
