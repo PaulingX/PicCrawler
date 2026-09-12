@@ -25,10 +25,29 @@ def test_normalize_img_4khd():
     )
 
 
-def test_normalize_wp_other():
+def test_normalize_wp_other_keeps_wrapper():
+    # 非 4khd 来源不再解包：imgbox 直链已返回占位图，Photon 包装仍可取到真图。
     assert (
         ip._normalize_remote_image_url("https://i0.wp.com/other.com/x.jpg")
-        == "https://other.com/x.jpg"
+        == "https://i0.wp.com/other.com/x.jpg"
+    )
+
+
+def test_normalize_imgbox_wraps_to_photon():
+    assert (
+        ip._normalize_remote_image_url("https://images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg")
+        == "https://i1.wp.com/images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg"
+    )
+    assert (
+        ip._normalize_remote_image_url("https://images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg?x=1")
+        == "https://i1.wp.com/images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg?x=1"
+    )
+
+
+def test_normalize_wp_imgbox_keeps_wrapper():
+    assert (
+        ip._normalize_remote_image_url("https://i1.wp.com/images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg")
+        == "https://i1.wp.com/images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg"
     )
 
 

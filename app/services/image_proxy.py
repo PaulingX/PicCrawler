@@ -17,6 +17,7 @@ from app.config import USER_AGENT
 from app.database import execute, query_all
 from app.services.hitomi_urls import hitomi_candidate_urls
 from app.services.rule_registry import build_crawler
+from app.services.utils import header_safe_url
 
 # 共享连接池 Session：浏览页一次会请求几十张代理图片，
 # 复用 TCP/TLS 连接能显著降低延迟，也减少对远端的握手压力。
@@ -162,6 +163,13 @@ def _is_displayable_image_url(url: str) -> bool:
     return bool(parsed.netloc)
 
 
+_IMGBOX_HOST_PATTERN = re.compile(r"^(?:images|thumbs)\d*\.imgbox\.com$")
+
+
+def _is_imgbox_image_host(host: str) -> bool:
+    return bool(_IMGBOX_HOST_PATTERN.match(str(host or "").strip().lower()))
+
+
 def _normalize_remote_image_url(url: str) -> str:
     if not url:
         return ""
@@ -189,7 +197,16 @@ def _normalize_remote_image_url(url: str) -> str:
             # Rewrite to img.uuss.uk path as done by upstream service worker.
             if _is_4khd_origin_host(origin_host):
                 return _rewrite_4khd_wp_to_uuss(origin_path, parsed.query)
-            return urlunparse(("https", origin_host, origin_path, "", parsed.query, ""))
+            # Other origins: keep the wrapper. Photon(i*.wp.com) caches the
+            # real image bytes; the unwrapped origin may no longer serve them
+            # (imgbox answers every direct request with a placeholder JPEG).
+            return url
+
+    # imgbox direct hotlinks now serve a 240x240 "Thumbnail Temporarily
+    # Unavailable" placeholder to every client; Photon still holds the real
+    # image, so route imgbox through the wp.com wrapper.
+    if _is_imgbox_image_host(host):
+        return urlunparse(("https", "i1.wp.com", f"/{host}{parsed.path or '/'}", "", parsed.query, ""))
 
     # Normalize legacy 4khd image hosts to current mirror image host.
     if host == "pic.4khd.com" or host == "img.4khd.com":
@@ -287,9 +304,13 @@ def _build_proxy_headers(referer: str = "", minimal: bool = False) -> dict[str, 
     if minimal:
         return headers
     if referer and _is_safe_remote_url(referer):
-        headers["Referer"] = referer
-        parsed_referer = urlparse(referer)
-        headers["Origin"] = f"{parsed_referer.scheme}://{parsed_referer.netloc}"
+        # hitomi 中文站详情页含非 ASCII 字符，Referer 头必须先做头部安全化，
+        # 否则 requests 发送时抛 UnicodeEncodeError，代理直接 500。
+        safe_referer = header_safe_url(referer)
+        parsed_referer = urlparse(safe_referer)
+        headers["Referer"] = safe_referer
+        if parsed_referer.scheme and parsed_referer.netloc:
+            headers["Origin"] = f"{parsed_referer.scheme}://{parsed_referer.netloc}"
     return headers
 
 

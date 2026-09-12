@@ -312,7 +312,7 @@ async function ensureOnlineTopicCount(ruleId, topic) {
   pumpTopicCountQueue();
 }
 
-const TOPIC_COUNT_MAX_CONCURRENT = 4;
+const TOPIC_COUNT_MAX_CONCURRENT = 2;
 let topicCountActive = 0;
 const topicCountQueue = [];
 
@@ -322,6 +322,38 @@ function pumpTopicCountQueue() {
     topicCountActive += 1;
     task().catch(() => {});
   }
+}
+
+// 每张卡片的数量统计都要抓一次远端详情页（尤其 WNACG 一页可聚合 200+ 主题），
+// 直接全量请求会触发站点限流，导致主题内图片加载失败。
+// 只对滚动进入视口附近的卡片发起统计，未浏览到的卡片不打扰远端。
+let topicCountObserver = null;
+const topicCountCardMeta = new WeakMap();
+
+function ensureObservedTopicCount(card, ruleId, topic) {
+  if (!("IntersectionObserver" in window)) {
+    ensureOnlineTopicCount(ruleId, topic).catch(() => {});
+    return;
+  }
+  if (!topicCountObserver) {
+    topicCountObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) {
+            return;
+          }
+          topicCountObserver.unobserve(entry.target);
+          const meta = topicCountCardMeta.get(entry.target);
+          if (meta) {
+            ensureOnlineTopicCount(meta.ruleId, meta.topic).catch(() => {});
+          }
+        });
+      },
+      { rootMargin: "400px 0px" }
+    );
+  }
+  topicCountCardMeta.set(card, { ruleId, topic });
+  topicCountObserver.observe(card);
 }
 
 async function downloadSelectedTopics() {
@@ -424,14 +456,20 @@ function normalizeProxyRawImageUrl(rawUrl) {
             out.search = parsed.search || "";
             return out.toString();
           }
-          const out = new URL(`https://${originHost}${originPath}`);
-          out.search = parsed.search || "";
-          return out.toString();
+          // Other origins keep the wp.com wrapper: imgbox direct links now
+          // return a placeholder image, while wp.com still serves real bytes.
+          return parsed.toString();
         }
       }
     }
     if (host === "pic.4khd.com" || host === "img.4khd.com") {
       const out = new URL(`https://img.uuss.uk${parsed.pathname || "/"}`);
+      out.search = parsed.search || "";
+      return out.toString();
+    }
+    if (/^(images|thumbs)\d*\.imgbox\.com$/.test(host)) {
+      // imgbox direct hotlinks return a placeholder; retry via wp.com wrapper.
+      const out = new URL(`https://i1.wp.com/${host}${parsed.pathname || "/"}`);
       out.search = parsed.search || "";
       return out.toString();
     }
@@ -1084,6 +1122,10 @@ async function loadTopics() {
 
 function renderTopics() {
   topicGridEl.innerHTML = "";
+  if (topicCountObserver) {
+    // 旧卡片已被整体替换，停掉旧观察，避免统计请求打到已不存在的卡片。
+    topicCountObserver.disconnect();
+  }
   if (state.topics.length === 0) {
     topicGridEl.innerHTML = '<div class="empty">当前页没有主题</div>';
     updateDownloadFab();
@@ -1160,9 +1202,7 @@ function renderTopics() {
         }
         updateDownloadFab();
       });
-      ensureOnlineTopicCount(state.activeTab.id, topic).catch(() => {
-        // no-op
-      });
+      ensureObservedTopicCount(card, state.activeTab.id, topic);
     }
 
     topicGridEl.appendChild(card);

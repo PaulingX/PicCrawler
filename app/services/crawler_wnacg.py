@@ -4,7 +4,9 @@ import hashlib
 import os
 import re
 import math
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.cookies import SimpleCookie
 from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
 
@@ -36,6 +38,30 @@ _NUMERIC_IMAGE_PATH_PATTERN = re.compile(
 )
 _ALT_SUFFIX_PATTERN = re.compile(r"_(\d{1,3}(?:_[a-z0-9]{2,})?)$", re.IGNORECASE)
 
+# 进程级 TTL 缓存：Flask 每个请求都会新建爬虫实例，主题数量与分页浏览会
+# 反复重抓同一主题的详情页 / 索引页 / 阅读页，请求量过大会触发 WNACG 限流，
+# 导致主题内图片整批加载失败。缓存放在类级别（跨实例共享）并带 TTL。
+_CACHE_MAX_ENTRIES = 512
+_DETAIL_TTL_SECONDS = 600.0
+_GALLERY_TTL_SECONDS = 600.0
+_VIEW_IMAGE_TTL_SECONDS = 1800.0
+_COUNT_TTL_SECONDS = 86400.0
+
+_DETAIL_CACHE: dict[str, tuple[float, str]] = {}
+_GALLERY_CACHE: dict[str, tuple[float, list[str], dict[str, str]]] = {}
+_VIEW_IMAGE_CACHE: dict[str, tuple[float, str]] = {}
+_COUNT_CACHE: dict[str, tuple[float, int]] = {}
+
+# WNACG 限流表现为 403/429/挑战页。检测到限流后进入短暂全局冷却，
+# 避免重试链立刻打出更多请求放大封锁。
+_RATE_COOLDOWN_SECONDS = 5.0
+_RATE_LOCK = threading.Lock()
+_RATE_COOLDOWN_UNTIL = 0.0
+
+# 阅读页解析相互独立，用小线程池并行抓取，缩短首个批次的等待时间。
+# 并发数保持保守，过高会在限流边缘触发整批失败。
+_PAGE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="piccrawler-wnacg")
+
 
 class CrawlerWnacg(BaseCrawler):
     base_url = "https://www.wnacg.com/"
@@ -64,12 +90,56 @@ class CrawlerWnacg(BaseCrawler):
 
         self._cf_session = self._build_cloudflare_session(proxy=proxy)
         self._cf_warmed = False
+        # 阅读页并行解析时多个线程共用 session，cookie 同步与 CF 预热需要互斥。
+        self._cookie_lock = threading.Lock()
 
         cookie_text = str(os.getenv("PICCRAWLER_WNACG_COOKIE", "")).strip()
         if cookie_text:
             self._load_cookie_string(cookie_text)
 
         self._resolved_base_url: str | None = None
+
+    @staticmethod
+    def _cache_get(cache: dict, key: str, ttl: float):
+        entry = cache.get(key)
+        if entry is None:
+            return None
+        ts, value = entry
+        if time.time() - ts > ttl:
+            cache.pop(key, None)
+            return None
+        return value
+
+    @staticmethod
+    def _cache_put(cache: dict, key: str, value) -> None:
+        if key not in cache and len(cache) >= _CACHE_MAX_ENTRIES:
+            for old_key in list(cache.keys())[:64]:
+                cache.pop(old_key, None)
+        cache[key] = (time.time(), value)
+
+    @staticmethod
+    def _note_rate_limit() -> None:
+        global _RATE_COOLDOWN_UNTIL
+        with _RATE_LOCK:
+            _RATE_COOLDOWN_UNTIL = time.time() + _RATE_COOLDOWN_SECONDS
+
+    @staticmethod
+    def _rate_limit_wait() -> float:
+        """命中限流冷却时需要等待的秒数（有上限，避免拖死请求线程）。"""
+        with _RATE_LOCK:
+            remaining = _RATE_COOLDOWN_UNTIL - time.time()
+        if remaining <= 0:
+            return 0.0
+        return min(remaining, 2.0)
+
+    def _get_topic_page_html(self, detail_url: str) -> str:
+        cached = self._cache_get(_DETAIL_CACHE, detail_url, _DETAIL_TTL_SECONDS)
+        if cached is not None:
+            return cached
+        html = self._fetch_page_html(detail_url, timeout=10.0, max_attempts=10)
+        if html and not self._looks_like_challenge(html, 200):
+            self._cache_put(_DETAIL_CACHE, detail_url, html)
+        return html
 
     def list_topics(self, page_no: int, query: str = "", category_id: int | None = None) -> list[dict]:
         page_no = max(1, int(page_no))
@@ -97,15 +167,24 @@ class CrawlerWnacg(BaseCrawler):
 
     def topic_image_count(self, detail_url: str) -> int:
         detail_url = urljoin(self._get_base_url(), detail_url)
-        html = self._fetch_page_html(detail_url, timeout=10.0, max_attempts=10)
+        # 页数是静态属性，长缓存可避免网格每张卡片都打一次详情页请求
+        # （一页最多 200+ 卡片，正是触发 WNACG 限流的主要来源）。
+        cached_count = self._cache_get(_COUNT_CACHE, detail_url, _COUNT_TTL_SECONDS)
+        if cached_count is not None:
+            return cached_count
+
+        html = self._get_topic_page_html(detail_url)
         if not html:
             raise RuntimeError("wnacg topic page fetch failed")
 
         parsed_count = self._extract_declared_image_count(html)
         if parsed_count > 0:
+            self._cache_put(_COUNT_CACHE, detail_url, parsed_count)
             return parsed_count
 
         view_pages, _ = self._collect_gallery_pages(detail_url, html)
+        if view_pages:
+            self._cache_put(_COUNT_CACHE, detail_url, len(view_pages))
         return len(view_pages)
 
     def topic_images_page(self, detail_url: str, offset: int = 0, limit: int = 20) -> dict:
@@ -113,7 +192,7 @@ class CrawlerWnacg(BaseCrawler):
         offset = max(0, int(offset))
         limit = max(1, min(200, int(limit)))
 
-        html = self._fetch_page_html(detail_url, timeout=10.0, max_attempts=10)
+        html = self._get_topic_page_html(detail_url)
         if not html:
             raise RuntimeError("wnacg topic page fetch failed")
 
@@ -192,6 +271,16 @@ class CrawlerWnacg(BaseCrawler):
         return list(page_data.get("items") or [])
 
     def _collect_gallery_pages(self, detail_url: str, html: str) -> tuple[list[str], dict[str, str]]:
+        cached = self._cache_get(_GALLERY_CACHE, detail_url, _GALLERY_TTL_SECONDS)
+        if cached is not None:
+            return cached
+
+        result = self._collect_gallery_pages_uncached(detail_url, html)
+        if result[0]:
+            self._cache_put(_GALLERY_CACHE, detail_url, result)
+        return result
+
+    def _collect_gallery_pages_uncached(self, detail_url: str, html: str) -> tuple[list[str], dict[str, str]]:
         view_pages: list[str] = []
         seen_pages: set[str] = set()
         thumb_by_page: dict[str, str] = {}
@@ -276,6 +365,51 @@ class CrawlerWnacg(BaseCrawler):
 
         return view_pages, thumb_by_page
 
+    def _resolve_view_page_image(self, page_url: str, detail_url: str) -> str:
+        """解析单个阅读页的大图地址；结果带 TTL 缓存，空结果也缓存避免反复重试。"""
+        cached = self._cache_get(_VIEW_IMAGE_CACHE, page_url, _VIEW_IMAGE_TTL_SECONDS)
+        if cached is not None:
+            return cached
+
+        chosen = ""
+        page_html = self._fetch_page_html(page_url, referer=detail_url, timeout=6.0, max_attempts=4)
+
+        if page_html and not self._looks_like_challenge(page_html, 200):
+            page_soup = BeautifulSoup(page_html, "html.parser")
+            for selector in [
+                "#photo_body img#picarea",
+                "#photo_body img.photo",
+                "img#picarea",
+                "#picarea img",
+                ".photo_body img.photo",
+                ".photo img",
+                "#posselect img",
+            ]:
+                page_img = page_soup.select_one(selector)
+                if not page_img:
+                    continue
+                candidate = self._extract_image_url(page_img, page_url)
+                if self._is_gallery_image_url(candidate) and not self._is_thumbnail_url(candidate):
+                    chosen = candidate
+                    break
+
+            if not chosen:
+                for match in _IMAGE_PATTERN.findall(page_html):
+                    candidate = self._normalize_image_url(match)
+                    if not self._is_gallery_image_url(candidate):
+                        continue
+                    if self._is_thumbnail_url(candidate):
+                        continue
+                    chosen = candidate
+                    break
+
+            if not chosen:
+                # 页面正常但没有大图时才做二次直取；限流页不值得再打 8 次请求。
+                chosen = self._fetch_view_image_direct(page_url, referer=detail_url)
+
+        self._cache_put(_VIEW_IMAGE_CACHE, page_url, chosen or "")
+        return chosen
+
     def _extract_images_from_pages(
         self,
         detail_url: str,
@@ -306,49 +440,26 @@ class CrawlerWnacg(BaseCrawler):
             images.append(normalized)
 
         upper = min(len(view_pages), max(start, end))
-        for idx in range(max(0, start), upper):
-            page_url = view_pages[idx]
-            page_html = self._fetch_page_html(page_url, referer=detail_url, timeout=6.0, max_attempts=4)
-            chosen = ""
+        indexes = range(max(0, start), upper)
 
-            if page_html:
-                page_soup = BeautifulSoup(page_html, "html.parser")
-                for selector in [
-                    "#photo_body img#picarea",
-                    "#photo_body img.photo",
-                    "img#picarea",
-                    "#picarea img",
-                    ".photo_body img.photo",
-                    ".photo img",
-                    "#posselect img",
-                ]:
-                    page_img = page_soup.select_one(selector)
-                    if not page_img:
-                        continue
-                    candidate = self._extract_image_url(page_img, page_url)
-                    if self._is_gallery_image_url(candidate) and not self._is_thumbnail_url(candidate):
-                        chosen = candidate
-                        break
-
-                if not chosen:
-                    for match in _IMAGE_PATTERN.findall(page_html):
-                        candidate = self._normalize_image_url(match)
-                        if not self._is_gallery_image_url(candidate):
-                            continue
-                        if self._is_thumbnail_url(candidate):
-                            continue
-                        chosen = candidate
-                        break
-
-            if not chosen and page_html:
-                chosen = self._fetch_view_image_direct(page_url, referer=detail_url)
-
+        def resolve(index: int) -> tuple[int, str]:
+            page_url = view_pages[index]
+            chosen = self._resolve_view_page_image(page_url, detail_url)
             if not chosen:
                 fallback = thumb_by_page.get(page_url, "")
                 if not self._is_unstable_qy0_url(fallback):
                     chosen = fallback
+            return index, chosen
 
-            push(chosen)
+        if len(indexes) > 1:
+            futures = [_PAGE_EXECUTOR.submit(resolve, idx) for idx in indexes]
+            for future in futures:
+                _, chosen = future.result()
+                push(chosen)
+        else:
+            for idx in indexes:
+                _, chosen = resolve(idx)
+                push(chosen)
 
         return images
 
@@ -560,6 +671,9 @@ class CrawlerWnacg(BaseCrawler):
                 attempt_count += 1
                 if attempt_count > max_attempts:
                     break
+                cooldown_wait = self._rate_limit_wait()
+                if cooldown_wait > 0:
+                    time.sleep(cooldown_wait)
                 if idx > 0 or header_idx > 0:
                     time.sleep(0.08)
                 status_code, text = self._request_page(
@@ -567,10 +681,12 @@ class CrawlerWnacg(BaseCrawler):
                     timeout=timeout,
                     headers=headers,
                 )
+                if self._looks_like_challenge(text, status_code=status_code):
+                    self._note_rate_limit()
+                    last_text = text
+                    continue
                 if text:
                     last_text = text
-                if self._looks_like_challenge(text, status_code=status_code):
-                    continue
                 if status_code >= 500:
                     continue
                 if text:
@@ -647,18 +763,20 @@ class CrawlerWnacg(BaseCrawler):
         return last_status, last_text
 
     def _sync_cookies_from(self, source_session: requests.Session) -> None:
-        if source_session is self.session:
-            if self._cf_session is not None:
-                self._cf_session.cookies.update(self.session.cookies)
-            return
+        with self._cookie_lock:
+            if source_session is self.session:
+                if self._cf_session is not None:
+                    self._cf_session.cookies.update(self.session.cookies)
+                return
 
-        if source_session is self._cf_session:
-            self.session.cookies.update(self._cf_session.cookies)
+            if source_session is self._cf_session:
+                self.session.cookies.update(self._cf_session.cookies)
 
     def _warmup_cloudflare_session(self, timeout: float) -> None:
-        if self._cf_session is None or self._cf_warmed:
+        with self._cookie_lock:
+            warmed = self._cf_warmed
+        if self._cf_session is None or warmed:
             return
-        self._cf_warmed = True
 
         probe_urls = [
             self.base_url,
@@ -673,6 +791,8 @@ class CrawlerWnacg(BaseCrawler):
             status_code = int(res.status_code or 0)
             text = res.text or ""
             if status_code == 200 and text.strip() and not self._looks_like_challenge(text, status_code):
+                with self._cookie_lock:
+                    self._cf_warmed = True
                 break
 
     def _build_request_header_variants(self, page_url: str, referer: str = "") -> list[dict[str, str]]:

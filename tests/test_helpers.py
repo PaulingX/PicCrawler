@@ -52,3 +52,51 @@ def test_cleanup_stale_running_jobs(app):
     row = query_one("SELECT status, error_message FROM download_jobs WHERE job_id='stale-1'")
     assert row["status"] == "failed"
     assert row["error_message"]
+
+
+def test_header_safe_url():
+    from app.services.utils import header_safe_url
+
+    # 纯 ASCII 原样返回
+    assert header_safe_url("https://hitomi.la/reader/123.html") == "https://hitomi.la/reader/123.html"
+    assert header_safe_url("") == ""
+    # 非 ASCII 字符被百分号编码，ASCII 部分不被二次编码
+    out = header_safe_url("https://hitomi.la/manga/xxx-中文-4184194.html")
+    assert out == "https://hitomi.la/manga/xxx-%E4%B8%AD%E6%96%87-4184194.html"
+    # 已有百分号转义不被二次编码
+    assert header_safe_url("https://x.com/a%20b-中.jpg") == "https://x.com/a%20b-%E4%B8%AD.jpg"
+    # 结果必须是 latin-1 可编码（可安全放入 HTTP 头）
+    out.encode("latin-1")
+
+
+def test_hitomi_gallery_id_from_slug_url():
+    from app.services.crawler_hitomi import CrawlerHitomi
+
+    crawler = CrawlerHitomi()
+    # /reader/ 与 /galleries/ 形态
+    assert crawler._extract_gallery_id("https://hitomi.la/reader/4184194.html") == 4184194
+    assert crawler._extract_gallery_id("https://hitomi.la/galleries/4184194.html") == 4184194
+    # galleryurl 的 /manga/ 中文 slug 形态（此前会解析失败导致下载报错）
+    assert (
+        crawler._extract_gallery_id(
+            "https://hitomi.la/manga/dorei-onna-kyoushi-keiko-1--decensored--中文-4184194.html"
+        )
+        == 4184194
+    )
+    assert crawler._extract_gallery_id("4184194") == 4184194
+    assert crawler._extract_gallery_id("https://hitomi.la/index-chinese.html") is None
+
+
+def test_download_normalize_imgbox_and_wp():
+    from app.services.download_worker import _normalize_download_image_url
+
+    # imgbox 直链会被改写为 Photon 包装（直链现在返回占位图）
+    assert (
+        _normalize_download_image_url("https://images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg")
+        == "https://i1.wp.com/images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg"
+    )
+    # 非 4khd 的 wp.com 包装保持原样
+    assert (
+        _normalize_download_image_url("https://i1.wp.com/images2.imgbox.com/2c/e6/x_o.jpg")
+        == "https://i1.wp.com/images2.imgbox.com/2c/e6/x_o.jpg"
+    )

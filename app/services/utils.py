@@ -3,9 +3,36 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
+
+
+def header_safe_url(value: str) -> str:
+    """把 URL 变成可以放进 HTTP 头的值。
+
+    HTTP 头只能是 latin-1，hitomi 中文站的详情页 URL 含非 ASCII 字符
+    （如 `...-中文-4184194.html`），直接作为 Referer 会触发
+    UnicodeEncodeError，导致图片代理 500 / 下载全部失败。
+    只对非 ASCII 字符做百分号编码，其余字符原样保留（避免二次编码）。
+    """
+    text = str(value or "")
+    if not text:
+        return ""
+    try:
+        text.encode("latin-1")
+        return text
+    except UnicodeEncodeError:
+        pass
+
+    parts: list[str] = []
+    for ch in text:
+        try:
+            ch.encode("latin-1")
+            parts.append(ch)
+        except UnicodeEncodeError:
+            parts.append(quote(ch, safe=""))
+    return "".join(parts)
 
 
 def utcnow() -> datetime:

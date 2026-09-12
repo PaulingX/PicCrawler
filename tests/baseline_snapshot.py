@@ -60,9 +60,14 @@ check(
     == "https://img.uuss.uk/x/y.jpg",
 )
 check(
-    "normalize wp->other",
+    "normalize wp->other keeps wrapper",
     routes._normalize_remote_image_url("https://i0.wp.com/other.com/x.jpg")
-    == "https://other.com/x.jpg",
+    == "https://i0.wp.com/other.com/x.jpg",
+)
+check(
+    "normalize imgbox wraps to photon",
+    routes._normalize_remote_image_url("https://images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg")
+    == "https://i1.wp.com/images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg",
 )
 check(
     "normalize passthrough",
@@ -165,6 +170,11 @@ check(
     "dl normalize pic",
     _normalize_download_image_url("https://pic.4khd.com/x/y.jpg")
     == "https://img.4khd.com/x/y.jpg",
+)
+check(
+    "dl normalize imgbox wraps to photon",
+    _normalize_download_image_url("https://images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg")
+    == "https://i1.wp.com/images2.imgbox.com/2c/e6/EKj0WMmE_o.jpg",
 )
 dl_cands = _candidate_download_urls("https://img.4khd.com/x/y.jpg")
 check("dl candidates non-empty", len(dl_cands) > 0)

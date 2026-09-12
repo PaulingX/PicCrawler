@@ -20,7 +20,7 @@ from app.config import USER_AGENT
 from app.database import execute
 from app.services.hitomi_urls import hitomi_candidate_urls
 from app.services.library_scanner import upsert_downloaded_topic
-from app.services.utils import guess_ext, sanitize_name, utcnow_str
+from app.services.utils import guess_ext, header_safe_url, sanitize_name, utcnow_str
 
 _LOG = logging.getLogger(__name__)
 class DownloadWorker:
@@ -341,10 +341,16 @@ def _normalize_download_image_url(url: str) -> str:
             origin_path = "/" + parts[1]
             if origin_host == "pic.4khd.com":
                 return _rewrite_pic_to_img(origin_path, parsed.query)
-            return urlunparse(("https", origin_host, origin_path, "", parsed.query, ""))
+            # Other origins: keep the Photon wrapper. imgbox direct links now
+            # serve a placeholder image; wp.com still holds the real bytes.
+            return url
 
     if host == "pic.4khd.com":
         return _rewrite_pic_to_img(parsed.path, parsed.query)
+
+    # imgbox direct hotlinks serve a placeholder; download via wp.com wrapper.
+    if re.match(r"^(?:images|thumbs)\d*\.imgbox\.com$", host):
+        return urlunparse(("https", "i1.wp.com", f"/{host}{parsed.path or '/'}", "", parsed.query, ""))
 
     return url
 
@@ -391,13 +397,16 @@ def _download_image_with_fallbacks(
 ) -> tuple[requests.Response, str]:
     errors: list[str] = []
     referer_ok = referer.startswith("http://") or referer.startswith("https://")
+    # hitomi 中文站详情页含非 ASCII 字符，Referer 必须头部安全化；
+    # 且该 CDN 校验 Referer，缺 Referer 时返回 404，所以不能简单丢弃。
+    safe_referer = header_safe_url(referer) if referer_ok else ""
 
     for candidate in _candidate_download_urls(image_url):
         plans = [
             {
                 "User-Agent": USER_AGENT,
                 "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                **({"Referer": referer} if referer_ok else {}),
+                **({"Referer": safe_referer} if safe_referer else {}),
             },
             {"User-Agent": USER_AGENT},
         ]

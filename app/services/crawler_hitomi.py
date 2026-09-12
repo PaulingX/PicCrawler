@@ -17,6 +17,8 @@ from app.config import USER_AGENT
 from app.services.crawler_base import BaseCrawler, make_session
 
 _GALLERY_ID_PATTERN = re.compile(r"(?:/reader/|/galleries/)(\d+)(?:\.html)?", re.IGNORECASE)
+# /manga/xxx-中文-4184194.html 等 galleryurl 形态：从结尾 -<id>.html 提取。
+_GALLERY_ID_SLUG_PATTERN = re.compile(r"-(\d+)\.html?$", re.IGNORECASE)
 _NOZOMI_INT_SIZE = 4
 _DEFAULT_GG_BASE = "1774080001/"
 _IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "avif"}
@@ -935,6 +937,11 @@ class CrawlerHitomi(BaseCrawler):
         raw = str(detail_url or "").strip()
         if raw.isdigit():
             return int(raw)
+        # 列表/搜索返回的详情链接形如 /manga/xxx-中文-4184194.html，
+        # galleryurl 字段同样是这种格式，需要从结尾的 -<id>.html 提取。
+        slug_match = _GALLERY_ID_SLUG_PATTERN.search(raw)
+        if slug_match:
+            return int(slug_match.group(1))
         return None
 
     def _fetch_gallery_info(self, gallery_id: int, max_urls: int | None = None) -> dict | None:
